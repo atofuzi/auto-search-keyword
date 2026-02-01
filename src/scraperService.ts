@@ -112,6 +112,7 @@ export class ScraperService {
                             const num = idx + 1;
                             record[`title_${num}`] = r.title;
                             record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
+                            record[`url_${num}`] = r.url;
                         });
 
                         rivalLessKeywords.push(record);

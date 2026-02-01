@@ -18,6 +18,9 @@ function App() {
   const [progress, setProgress] = useState({ current: 0, total: 0, label: 'Standard' });
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
+  // Modal State
+  const [selectedResult, setSelectedResult] = useState<Result | null>(null);
+
   const logContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -88,6 +91,24 @@ function App() {
     socket.emit('stop');
   };
 
+  // Generate Prompt
+  const generatePrompt = (r: Result) => {
+    let prompt = `キーワード「${r.keyword}」について記事を書きたいです。\n以下は現在の上位記事のタイトルです。\n\n`;
+    for (let i = 1; i <= 5; i++) {
+      if (r[`title_${i}`]) {
+        prompt += `${i}. ${r[`title_${i}`]}\n`;
+      }
+    }
+    prompt += `\nこれらを踏まえて、検索意図を満たしつつ、差別化できる記事構成案（タイトル案・見出し構成）を作成してください。`;
+    return prompt;
+  };
+
+  const handleCopyPrompt = (r: Result) => {
+    const prompt = generatePrompt(r);
+    navigator.clipboard.writeText(prompt);
+    alert('Copied prompt to clipboard! Now open Gemini and paste it.');
+  };
+
   const progressPercent = progress.total > 0 && progress.current > 0
     ? (progress.current / progress.total) * 100
     : 0;
@@ -152,10 +173,18 @@ function App() {
         <h2>Results ({results.length})</h2>
         <div className="results-grid">
           {results.map((r, i) => (
-            <div key={i} className="result-card">
+            <div
+              key={i}
+              className="result-card"
+              onClick={() => setSelectedResult(r)}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="result-keyword">{r.keyword}</div>
               <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                Top 1: {r.title_1.substring(0, 30)}...
+                Top 1: {r.title_1 ? r.title_1.substring(0, 30) + '...' : 'N/A'}
+              </div>
+              <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#38bdf8' }}>
+                Click for AI Analysis &rarr;
               </div>
             </div>
           ))}
@@ -175,6 +204,53 @@ function App() {
           ))}
         </div>
       </div>
+
+      {/* Detail Modal */}
+      {selectedResult && (
+        <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
+
+            <h2>{selectedResult.keyword}</h2>
+
+            <div className="modal-actions">
+              <button onClick={() => handleCopyPrompt(selectedResult)} style={{ marginRight: '1rem' }}>
+                1. Copy Prompt for Gemini
+              </button>
+              <a
+                href="https://gemini.google.com/app"
+                target="_blank"
+                rel="noreferrer"
+                className="button-link"
+              >
+                2. Open Gemini
+              </a>
+            </div>
+
+            <div className="result-details">
+              <h3>Top Search Results</h3>
+              {[1, 2, 3, 4, 5].map(num => {
+                const title = selectedResult[`title_${num}`];
+                const url = selectedResult[`url_${num}`]; // Raw URL
+                if (!title) return null;
+                return (
+                  <div key={num} className="detail-item">
+                    <span className="rank-badge">{num}</span>
+                    <div className="detail-content">
+                      <div className="detail-title">{title}</div>
+                      {url && (
+                        <a href={url} target="_blank" rel="noreferrer" className="detail-link">
+                          {url}
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
