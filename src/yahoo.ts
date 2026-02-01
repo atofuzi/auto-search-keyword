@@ -39,7 +39,7 @@ export class YahooScraper {
         }
     }
 
-    async getSearchResults(keyword: string): Promise<string[]> {
+    async getSearchResults(keyword: string): Promise<{ title: string; url: string }[]> {
         if (!this.page) throw new Error('Scraper not initialized');
 
         try {
@@ -49,13 +49,27 @@ export class YahooScraper {
             // await this.page.waitForSelector('#sw-Contents', { state: 'attached', timeout: 10000 });
             // Timeout occurring, changing to wait for load state or body
             await this.page.waitForLoadState('domcontentloaded');
-            await this.page.waitForSelector('body', { timeout: 10000 });
 
-            const titleSelector = '.sw-Card__titleMain';
-            const titles = await this.page.$$eval(titleSelector, (els) => {
-                return els.slice(0, 5).map(el => el.textContent?.trim() || '');
+            // Wait for results container specifically if possible, otherwise rely on extraction
+            try {
+                await this.page.waitForSelector('.sw-Card__titleMain', { timeout: 5000 });
+            } catch (e) {
+                // Ignore timeout here as extraction might handle partials or 0 results
+            }
+
+            // Extract Title and URL
+            const results = await this.page.$$eval('.sw-Card__title', (cards) => {
+                return cards.slice(0, 5).map(card => {
+                    const anchor = card.querySelector('a');
+                    const titleEl = card.querySelector('.sw-Card__titleMain');
+                    return {
+                        title: titleEl?.textContent?.trim() || anchor?.textContent?.trim() || '',
+                        url: anchor?.href || ''
+                    };
+                });
             });
-            return titles;
+
+            return results;
         } catch (e) {
             console.error(`Error searching for ${keyword}:`, e);
             throw e; // Throw so we can handle it in index.ts

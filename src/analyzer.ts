@@ -1,23 +1,25 @@
-export function isRivalLess(keyword: string, titles: string[]): boolean {
-    // キーワードを空白で分割
-    const parts = keyword.split(/[\s|　]+/).filter(p => p.length > 0);
+// signature changed: removed 'keyword' as it wasn't strictly needed for logic, but kept for compatibility if needed? No, removing it is cleaner.
+export function isRivalLess(titles: string[], mustWords: string[], anyWords: string[] = []): boolean {
 
-    // 5つのタイトルのうち、すべてのキーワード（parts）が含まれているタイトルを探す
+    // 5つのタイトルのうち、条件を満たすタイトルがあるか探す
+    // 条件: (mustWordsが全て含まれている) AND (anyWordsがあれば、そのうち少なくとも1つが含まれている)
     for (const title of titles) {
-        let allIncluded = true;
-        for (const part of parts) {
-            if (!title.includes(part)) {
-                allIncluded = false;
-                break;
-            }
+        // 1. 必須ワード（mustWords）が全て含まれているかチェック
+        const mustMatch = mustWords.every(w => title.includes(w));
+        if (!mustMatch) continue; // 必須ワードが無いなら、このタイトルはライバルではない
+
+        // 2. 任意ワード（anyWords）がある場合、そのうち少なくとも1つが含まれているかチェック
+        let anyMatch = true;
+        if (anyWords.length > 0) {
+            anyMatch = anyWords.some(w => title.includes(w));
         }
-        // もし全てのキーワードが含まれているタイトルが1つでもあれば、それは「ライバルあり」とみなす
-        // つまり、ライバルレスではない
-        if (allIncluded) {
-            return false;
+
+        // 両方満たせば、それは「ライバル記事」である
+        if (mustMatch && anyMatch) {
+            return false; // ライバルあり（＝ライバルレスではない）
         }
     }
 
-    // どのタイトルにもキーワードが完全には含まれていない場合、ライバルレスと判断
+    // どのタイトルも条件を満たさなかった場合、ライバルレスと判断
     return true;
 }
