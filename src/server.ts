@@ -11,7 +11,12 @@ app.use(cors());
 app.use(express.json());
 
 // Serve static files (CSV downloads) from root
-app.use('/download', express.static(process.cwd()));
+// Serve static files (CSV downloads) from root
+app.use('/download', express.static(process.cwd(), {
+    setHeaders: (res, path, stat) => {
+        res.set('Content-Disposition', 'attachment');
+    }
+}));
 
 const server = http.createServer(app);
 const io = new Server(server, {
