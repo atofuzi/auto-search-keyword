@@ -91,46 +91,59 @@ export class ScraperService {
 
                 socket.emit('progress', { phase: 'analysis', current: count, total: keywordsArray.length, keyword });
 
-                try {
-                    // Construct intitle query
-                    // Split keyword into parts and prepend intitle:
-                    const parts = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
-                    const intitleQuery = parts.map(p => `intitle:${p}`).join(' ');
+                // Retry loop for this specific keyword
+                while (this.isRunning) {
+                    try {
+                        // Construct intitle query
+                        // Split keyword into parts and prepend intitle:
+                        const parts = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
+                        const intitleQuery = parts.map(p => `intitle:${p}`).join(' ');
 
-                    // Search with pagination support (up to 2 pages = 20 results)
-                    // Note: If we need strictly top 20, maxPages=2 is correct.
-                    const results = await this.scraper.getSearchResults(intitleQuery, 2);
+                        // Search with pagination support (up to 2 pages = 20 results)
+                        // Note: If we need strictly top 20, maxPages=2 is correct.
+                        const results = await this.scraper.getSearchResults(intitleQuery, 2);
 
-                    // Logic: If the number of exact match results is <= threshold, it is rival-less.
-                    if (results.length <= threshold) {
-                        const record: any = { keyword: keyword };
+                        // Logic: If the number of exact match results is <= threshold, it is rival-less.
+                        if (results.length <= threshold) {
+                            const record: any = { keyword: keyword };
 
-                        // Populate up to 5 results for CSV (even if we fetched 20, CSV header only has 5 slots currently)
-                        // If we want to save all, we need dynamic headers, but existing requirement implies top 5 is enough for display?
-                        // "CSV output feature... Outputs Top 5" -> Keep top 5 in CSV.
+                            // Populate up to 5 results for CSV (even if we fetched 20, CSV header only has 5 slots currently)
+                            // "CSV output feature... Outputs Top 5" -> Keep top 5 in CSV.
 
-                        results.slice(0, 5).forEach((r, idx) => {
-                            const num = idx + 1;
-                            record[`title_${num}`] = r.title;
-                            record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
-                            record[`url_${num}`] = r.url;
-                        });
+                            results.slice(0, 5).forEach((r, idx) => {
+                                const num = idx + 1;
+                                record[`title_${num}`] = r.title;
+                                record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
+                                record[`url_${num}`] = r.url;
+                            });
 
-                        rivalLessKeywords.push(record);
-                        await csvWriter.writeRecords([record]);
+                            rivalLessKeywords.push(record);
+                            await csvWriter.writeRecords([record]);
 
-                        // Emit Found Result (send all top 5 for modal)
-                        socket.emit('result', record);
-                        socket.emit('log', `Found Rival-less (${results.length} hits): ${keyword}`);
-                    } else {
-                        // socket.emit('log', `Skipping: ${keyword} (${results.length} hits > ${threshold})`);
+                            // Emit Found Result (send all top 5 for modal)
+                            socket.emit('result', record);
+                            socket.emit('log', `Found Rival-less (${results.length} hits): ${keyword}`);
+                        } else {
+                            // socket.emit('log', `Skipping: ${keyword} (${results.length} hits > ${threshold})`);
+                        }
+
+                        await sleep(2000); // Normal interval
+                        break; // Success, exit retry loop and move to next keyword
+
+                    } catch (e: any) {
+                        if (e.message && e.message.includes('Blocked/Captcha')) {
+                            const minutes = 3;
+                            socket.emit('log', `⚠️ Block detected! Cooling down for ${minutes} minutes... (Will retry "${keyword}")`);
+                            // Wait for cooldown
+                            await sleep(minutes * 60 * 1000);
+                            socket.emit('log', `♻️ Resuming analysis for "${keyword}"...`);
+                            // Loop continues automatically to retry
+                        } else {
+                            console.error(e);
+                            socket.emit('log', `Error processing ${keyword}: ${e.message}`);
+                            break; // Unknown error, skip to next keyword
+                        }
                     }
-
-                    await sleep(2000);
-
-                } catch (e) {
-                    console.error(e);
-                    socket.emit('log', `Error processing ${keyword}`);
                 }
             }
 

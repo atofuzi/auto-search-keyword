@@ -56,8 +56,19 @@ export class YahooScraper {
                 try {
                     await this.page.waitForSelector('.sw-Card__titleMain', { timeout: 3000 });
                 } catch (e) {
-                    // If no results on this page, likely done
-                    break;
+                    // If element not found, check if it's a valid "No Results" page
+                    const bodyText = await this.page.textContent('body');
+                    if (bodyText?.includes('一致する情報は見つかりませんでした')) {
+                        // Truly 0 results
+                        break;
+                    } else if (bodyText?.includes('一時的にアクセスできません') || bodyText?.includes('二段階認証')) {
+                        // CAPTCHA or Ban detection
+                        throw new Error('Yahoo Search Blocked/Captcha detected');
+                    } else {
+                        // Unknown state (maybe layout changed or slow load), but risking it as 0 results is bad.
+                        // Let's create a screenshot for debug if possible, but for now throw error.
+                        throw new Error('Search results incompatible (Possible block or layout change)');
+                    }
                 }
 
                 // Extract Title and URL from current page
