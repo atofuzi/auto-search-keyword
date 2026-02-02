@@ -21,7 +21,7 @@ export class ScraperService {
         await this.scraper.close();
     }
 
-    async start(baseKeyword: string, customCheckWords: string[], socket: any) {
+    async start(baseKeyword: string, customCheckWords: string[], socket: any, threshold: number = 3, verificationMode: boolean = false) {
         if (this.isRunning) return;
         this.isRunning = true;
 
@@ -58,7 +58,9 @@ export class ScraperService {
             // --- Phase 1: Suggestions ---
             socket.emit('log', '--- Phase 1: Collecting Suggestions ---');
 
-            for (const char of HIRAGANA_LIST) {
+            const chars_to_check = verificationMode ? HIRAGANA_LIST.slice(0, 10) : HIRAGANA_LIST;
+
+            for (const char of chars_to_check) {
                 if (!this.isRunning) break;
 
                 const suggestions = await this.scraper.getSuggestions(baseKeyword, char);
@@ -74,6 +76,9 @@ export class ScraperService {
             socket.emit('log', `Total unique keywords found: ${uniqueKeywords.size}`);
             socket.emit('totalKeywords', uniqueKeywords.size);
 
+            // Emit full suggestion list for UI
+            socket.emit('suggestionList', Array.from(uniqueKeywords));
+
             // --- Phase 2: Search & Analysis ---
             socket.emit('log', '--- Phase 2: Analyzing Search Results ---');
 
@@ -87,28 +92,24 @@ export class ScraperService {
                 socket.emit('progress', { phase: 'analysis', current: count, total: keywordsArray.length, keyword });
 
                 try {
-                    const results = await this.scraper.getSearchResults(keyword);
-                    if (results.length === 0) continue;
+                    // Construct intitle query
+                    // Split keyword into parts and prepend intitle:
+                    const parts = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
+                    const intitleQuery = parts.map(p => `intitle:${p}`).join(' ');
 
-                    // Logic Setup
-                    const suggestPart = keyword.replace(baseKeyword, '').trim();
-                    const suggestWords = suggestPart.split(/[\s|　]+/).filter(s => s.length > 0);
+                    // Search with pagination support (up to 2 pages = 20 results)
+                    // Note: If we need strictly top 20, maxPages=2 is correct.
+                    const results = await this.scraper.getSearchResults(intitleQuery, 2);
 
-                    let mustWords: string[] = [];
-                    let anyWords: string[] = [];
-
-                    if (customCheckWords.length > 0) {
-                        mustWords = suggestWords;
-                        anyWords = customCheckWords;
-                    } else {
-                        mustWords = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
-                    }
-
-                    const titlesOnly = results.map(r => r.title);
-
-                    if (isRivalLess(titlesOnly, mustWords, anyWords)) {
+                    // Logic: If the number of exact match results is <= threshold, it is rival-less.
+                    if (results.length <= threshold) {
                         const record: any = { keyword: keyword };
-                        results.forEach((r, idx) => {
+
+                        // Populate up to 5 results for CSV (even if we fetched 20, CSV header only has 5 slots currently)
+                        // If we want to save all, we need dynamic headers, but existing requirement implies top 5 is enough for display?
+                        // "CSV output feature... Outputs Top 5" -> Keep top 5 in CSV.
+
+                        results.slice(0, 5).forEach((r, idx) => {
                             const num = idx + 1;
                             record[`title_${num}`] = r.title;
                             record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
@@ -118,9 +119,11 @@ export class ScraperService {
                         rivalLessKeywords.push(record);
                         await csvWriter.writeRecords([record]);
 
-                        // Emit Found Result
+                        // Emit Found Result (send all top 5 for modal)
                         socket.emit('result', record);
-                        socket.emit('log', `Found Rival-less: ${keyword}`);
+                        socket.emit('log', `Found Rival-less (${results.length} hits): ${keyword}`);
+                    } else {
+                        // socket.emit('log', `Skipping: ${keyword} (${results.length} hits > ${threshold})`);
                     }
 
                     await sleep(2000);

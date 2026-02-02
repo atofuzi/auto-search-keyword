@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -25,12 +26,15 @@ const scraperService = new ScraperService();
 io.on('connection', (socket) => {
     console.log('Client connected');
 
-    socket.on('start', async (data: { keyword: string, customWords: string }) => {
+    socket.on('start', async (data: { keyword: string, customWords: string, threshold?: number }) => {
         console.log('Start command received', data);
-        const { keyword, customWords } = data;
+        const { keyword, customWords, threshold = 3 } = data;
         const customWordsList = customWords ? customWords.split(/[\s|　]+/).filter(s => s.length > 0) : [];
 
-        await scraperService.start(keyword, customWordsList, socket);
+        // Read Verification Mode from Env
+        const verificationMode = process.env.VERIFICATION_MODE === 'true';
+
+        await scraperService.start(keyword, customWordsList, socket, threshold, verificationMode);
     });
 
     socket.on('stop', async () => {

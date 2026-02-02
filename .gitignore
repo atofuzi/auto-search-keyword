@@ -4,3 +4,4 @@ dist
 # logs, temp files
 *.log
 .DS_Store
+.env

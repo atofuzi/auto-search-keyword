@@ -12,9 +12,13 @@ interface Result {
 function App() {
   const [keyword, setKeyword] = useState('');
   const [customWords, setCustomWords] = useState('');
+  const [threshold, setThreshold] = useState(3);
+  // Verification Mode is now env var only
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [results, setResults] = useState<Result[]>([]);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, label: 'Standard' });
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
@@ -31,8 +35,11 @@ function App() {
     socket.on('status', (data: any) => {
       if (data.state === 'running') {
         setIsRunning(true);
+        setIsRunning(true);
         setLogs([]);
         setResults([]);
+        setSuggestions([]);
+        setShowSuggestions(false);
         setDownloadUrl(null);
         setProgress({ current: 0, total: 0, label: 'Starting...' });
       } else if (data.state === 'idle') {
@@ -62,6 +69,10 @@ function App() {
       setResults(prev => [result, ...prev]);
     });
 
+    socket.on('suggestionList', (list: string[]) => {
+      setSuggestions(list);
+    });
+
     socket.on('totalKeywords', (total: number) => {
       setProgress(p => ({ ...p, total }));
     });
@@ -84,7 +95,7 @@ function App() {
 
   const handleStart = () => {
     if (!keyword) return;
-    socket.emit('start', { keyword, customWords });
+    socket.emit('start', { keyword, customWords, threshold });
   };
 
   const handleStop = () => {
@@ -139,6 +150,17 @@ function App() {
               disabled={isRunning}
             />
           </div>
+          <div className="input-group">
+            <label>Rival Threshold (Default: 3)</label>
+            <input
+              type="number"
+              value={threshold}
+              onChange={e => setThreshold(Number(e.target.value))}
+              min="0"
+              max="20"
+              disabled={isRunning}
+            />
+          </div>
           {!isRunning ? (
             <button onClick={handleStart} disabled={!keyword}>START SCRAPING</button>
           ) : (
@@ -188,13 +210,47 @@ function App() {
               </div>
             </div>
           ))}
-          {results.length === 0 && !isRunning && (
-            <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem' }}>
-              No results yet. Click START to begin.
-            </div>
-          )}
         </div>
+        {results.length === 0 && !isRunning && (
+          <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem' }}>
+            No results yet. Click START to begin.
+          </div>
+        )}
       </div>
+
+      {/* Suggestions List Card */}
+      {
+        suggestions.length > 0 && (
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3>Collected Suggestions ({suggestions.length})</h3>
+              <button
+                onClick={() => setShowSuggestions(!showSuggestions)}
+                style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
+              >
+                {showSuggestions ? 'Hide' : 'Show'} List
+              </button>
+            </div>
+
+            {showSuggestions && (
+              <div className="keyword-list" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', maxHeight: '300px', overflowY: 'auto' }}>
+                {suggestions.map((k, i) => (
+                  <span key={i} style={{
+                    background: '#334155',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '0.8rem',
+                    color: '#e2e8f0',
+                    border: '1px solid #475569'
+                  }}>
+                    {k}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      }
 
       <div className="card">
         <h3>System Logs</h3>
@@ -206,52 +262,54 @@ function App() {
       </div>
 
       {/* Detail Modal */}
-      {selectedResult && (
-        <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
+      {
+        selectedResult && (
+          <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+              <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
 
-            <h2>{selectedResult.keyword}</h2>
+              <h2>{selectedResult.keyword}</h2>
 
-            <div className="modal-actions">
-              <button onClick={() => handleCopyPrompt(selectedResult)} style={{ marginRight: '1rem' }}>
-                1. Copy Prompt for Gemini
-              </button>
-              <a
-                href="https://gemini.google.com/app"
-                target="_blank"
-                rel="noreferrer"
-                className="button-link"
-              >
-                2. Open Gemini
-              </a>
-            </div>
+              <div className="modal-actions">
+                <button onClick={() => handleCopyPrompt(selectedResult)} style={{ marginRight: '1rem' }}>
+                  1. Copy Prompt for Gemini
+                </button>
+                <a
+                  href="https://gemini.google.com/app"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="button-link"
+                >
+                  2. Open Gemini
+                </a>
+              </div>
 
-            <div className="result-details">
-              <h3>Top Search Results</h3>
-              {[1, 2, 3, 4, 5].map(num => {
-                const title = selectedResult[`title_${num}`];
-                const url = selectedResult[`url_${num}`]; // Raw URL
-                if (!title) return null;
-                return (
-                  <div key={num} className="detail-item">
-                    <span className="rank-badge">{num}</span>
-                    <div className="detail-content">
-                      <div className="detail-title">{title}</div>
-                      {url && (
-                        <a href={url} target="_blank" rel="noreferrer" className="detail-link">
-                          {url}
-                        </a>
-                      )}
+              <div className="result-details">
+                <h3>Top Search Results</h3>
+                {[1, 2, 3, 4, 5].map(num => {
+                  const title = selectedResult[`title_${num}`];
+                  const url = selectedResult[`url_${num}`]; // Raw URL
+                  if (!title) return null;
+                  return (
+                    <div key={num} className="detail-item">
+                      <span className="rank-badge">{num}</span>
+                      <div className="detail-content">
+                        <div className="detail-title">{title}</div>
+                        {url && (
+                          <a href={url} target="_blank" rel="noreferrer" className="detail-link">
+                            {url}
+                          </a>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </div>
+        )
+      }
+    </div >
   );
 }
 
