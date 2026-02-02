@@ -41,11 +41,11 @@ function App() {
         setSuggestions([]);
         setShowSuggestions(false);
         setDownloadUrl(null);
-        setProgress({ current: 0, total: 0, label: 'Starting...' });
+        setProgress({ current: 0, total: 0, label: '開始中...' });
       } else if (data.state === 'idle') {
         setIsRunning(false);
         if (data.downloadUrl) setDownloadUrl(data.downloadUrl);
-        setProgress(p => ({ ...p, label: 'Complete' }));
+        setProgress(p => ({ ...p, label: '完了' }));
       }
     });
 
@@ -54,13 +54,13 @@ function App() {
         setProgress({
           current: 0,
           total: 0,
-          label: `Collecting Suggestions... (${data.char}) - Found: ${data.count}`
+          label: `サジェスト収集中... (${data.char}) - 発見数: ${data.count}`
         });
       } else if (data.phase === 'analysis') {
         setProgress({
           current: data.current,
           total: data.total,
-          label: `Analyzing: ${data.keyword} (${data.current}/${data.total})`
+          label: `分析中: ${data.keyword} (${data.current}/${data.total})`
         });
       }
     });
@@ -117,7 +117,7 @@ function App() {
   const handleCopyPrompt = (r: Result) => {
     const prompt = generatePrompt(r);
     navigator.clipboard.writeText(prompt);
-    alert('Copied prompt to clipboard! Now open Gemini and paste it.');
+    alert('Gemini用のプロンプトをコピーしました！Geminiを開いて貼り付けてください。');
   };
 
   const progressPercent = progress.total > 0 && progress.current > 0
@@ -128,49 +128,67 @@ function App() {
     <div className="container">
       <h1>Yahoo Rival-less Keyword Finder</h1>
 
+      <div className="card" style={{ marginBottom: '2rem', fontSize: '0.9rem', color: '#cbd5e1' }}>
+        <h3 style={{ marginTop: 0, marginBottom: '0.5rem', color: '#fff' }}>このツールの仕様</h3>
+        <ul style={{ paddingLeft: '1.5rem', margin: 0, lineHeight: '1.6' }}>
+          <li>検索エンジン：<strong>Yahoo! JAPAN</strong></li>
+          <li><strong>Step 1</strong>: 「狙っているワード」+「あいうえお（五十音）」検索で、虫眼鏡のサジェストワードを自動収集します。</li>
+          <li><strong>Step 2</strong>: 「狙っているワード」+「サジェストワード」で検索し、ライバル記事の数（すべてのキーワードがタイトルに含まれる記事数）を調査します。</li>
+          <li>検索結果の最大取得ページは <strong>2ページ</strong> までです。</li>
+        </ul>
+      </div>
+
       <div className="card">
         <div className="controls">
           <div className="input-group">
-            <label>Base Keyword</label>
+            <label>狙っているワード</label>
             <input
               type="text"
               value={keyword}
               onChange={e => setKeyword(e.target.value)}
-              placeholder="e.g. ミラノオリンピック"
+              placeholder="例: ミラノオリンピック"
               disabled={isRunning}
             />
           </div>
-          <div className="input-group">
-            <label>Custom Check Words (Optional)</label>
+          <div className="input-group" style={{ flex: '1 1 100%' }}>
+            <label>ライバル記事タイトルに含まれているかチェックしたいキーワード（オプション）</label>
+            <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: '0 0 0.5rem 0' }}>例）ミラノオリンピック → ミラノも対象にしたい場合は「ミラノ」と記載</p>
             <input
               type="text"
               value={customWords}
               onChange={e => setCustomWords(e.target.value)}
-              placeholder="e.g. ミラノ オリンピック"
+              placeholder="例: ミラノ オリンピック"
               disabled={isRunning}
             />
           </div>
-          <div className="input-group">
-            <label>Rival Threshold (Default: 3)</label>
-            <input
-              type="number"
-              value={threshold}
-              onChange={e => setThreshold(Number(e.target.value))}
-              min="0"
-              max="20"
-              disabled={isRunning}
-            />
+          <div className="input-group" style={{ flex: '1 1 100%' }}>
+            <label>ライバルレス判定基準</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#f8fafc' }}>
+              <span>すべてのキーワードがタイトルに含まれる記事が</span>
+              <input
+                type="number"
+                value={threshold}
+                onChange={e => setThreshold(Number(e.target.value))}
+                min="0"
+                max="20"
+                disabled={isRunning}
+                style={{ width: '60px', textAlign: 'center' }}
+              />
+              <span>記事以内</span>
+            </div>
           </div>
-          {!isRunning ? (
-            <button onClick={handleStart} disabled={!keyword}>START SCRAPING</button>
-          ) : (
-            <button className="stop" onClick={handleStop}>STOP</button>
-          )}
+          <div style={{ width: '100%', marginTop: '1rem' }}>
+            {!isRunning ? (
+              <button onClick={handleStart} disabled={!keyword} style={{ width: '100%' }}>実行</button>
+            ) : (
+              <button className="stop" onClick={handleStop} style={{ width: '100%' }}>停止</button>
+            )}
+          </div>
         </div>
 
         <div className="progress-section">
           <div className="progress-label">
-            <span>{progress.label}</span>
+            <span>{progress.label === 'Standard' ? '待機中' : progress.label}</span>
             <span>{Math.round(progressPercent)}%</span>
           </div>
           <div className="progress-track">
@@ -183,16 +201,16 @@ function App() {
         <div className="status-bar">
           <div className="status-indicator">
             <span className={`status-dot ${isRunning ? 'active' : ''}`}></span>
-            {isRunning ? 'Running...' : (downloadUrl ? 'Finished' : 'Ready')}
+            {isRunning ? '実行中...' : (downloadUrl ? '完了' : '準備完了')}
           </div>
           {downloadUrl && (
             <a href={`http://localhost:3000${downloadUrl}`} className="download-link" download>
-              Downloads CSV
+              CSVをダウンロード
             </a>
           )}
         </div>
 
-        <h2>Results ({results.length})</h2>
+        <h2>分析結果 ({results.length})</h2>
         <div className="results-grid">
           {results.map((r, i) => (
             <div
@@ -203,17 +221,17 @@ function App() {
             >
               <div className="result-keyword">{r.keyword}</div>
               <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                Top 1: {r.title_1 ? r.title_1.substring(0, 30) + '...' : 'N/A'}
+                Top 1: {r.title_1 ? r.title_1.substring(0, 30) + '...' : 'なし'}
               </div>
               <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#38bdf8' }}>
-                Click for AI Analysis &rarr;
+                クリックしてAI分析 &rarr;
               </div>
             </div>
           ))}
         </div>
         {results.length === 0 && !isRunning && (
           <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem' }}>
-            No results yet. Click START to begin.
+            結果はまだありません。「実行」ボタンを押して開始してください。
           </div>
         )}
       </div>
@@ -223,12 +241,12 @@ function App() {
         suggestions.length > 0 && (
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Collected Suggestions ({suggestions.length})</h3>
+              <h3>取得した関連キーワード ({suggestions.length})</h3>
               <button
                 onClick={() => setShowSuggestions(!showSuggestions)}
                 style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
               >
-                {showSuggestions ? 'Hide' : 'Show'} List
+                {showSuggestions ? 'リストを隠す' : 'リストを表示'}
               </button>
             </div>
 
@@ -253,7 +271,7 @@ function App() {
       }
 
       <div className="card">
-        <h3>System Logs</h3>
+        <h3>システムログ</h3>
         <div className="logs" ref={logContainerRef}>
           {logs.map((log, i) => (
             <div key={i} className="log-entry">&gt; {log}</div>
@@ -272,7 +290,7 @@ function App() {
 
               <div className="modal-actions">
                 <button onClick={() => handleCopyPrompt(selectedResult)} style={{ marginRight: '1rem' }}>
-                  1. Copy Prompt for Gemini
+                  1. Gemini用プロンプトをコピー
                 </button>
                 <a
                   href="https://gemini.google.com/app"
@@ -280,12 +298,12 @@ function App() {
                   rel="noreferrer"
                   className="button-link"
                 >
-                  2. Open Gemini
+                  2. Geminiを開く
                 </a>
               </div>
 
               <div className="result-details">
-                <h3>Top Search Results</h3>
+                <h3>上位の検索結果</h3>
                 {[1, 2, 3, 4, 5].map(num => {
                   const title = selectedResult[`title_${num}`];
                   const url = selectedResult[`url_${num}`]; // Raw URL
