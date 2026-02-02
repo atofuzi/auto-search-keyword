@@ -64,6 +64,12 @@ source ~/.nvm/nvm.sh
     **※もしエラーになる場合**
     `cd client && npm install` を手動で実行してから、トップに戻ってください。
 
+    **※「Executable doesn't exist」等のエラーが出る場合**
+    ブラウザ本体がインストールされていません。以下を実行してください。
+    ```bash
+    npx playwright install
+    ```
+
 ---
 
 ## ステップ3: アプリを起動する
