@@ -15,6 +15,12 @@ export class YahooScraper {
         }
     }
 
+    async clearCookies() {
+        if (this.page) {
+            await this.page.context().clearCookies();
+        }
+    }
+
     async getSuggestions(baseKeyword: string, hiragana: string): Promise<string[]> {
         if (!this.page) throw new Error('Scraper not initialized');
 
@@ -30,7 +36,11 @@ export class YahooScraper {
             await this.page.waitForSelector(suggestListSelector, { timeout: 1000 });
 
             const suggestions = await this.page.$$eval(`${suggestListSelector} li a`, (els) => {
-                return els.map(el => el.textContent?.trim() || '').filter(t => t.length > 0);
+                return els.map(el => {
+                    // Use innerText instead of textContent to respect styling/layout and avoid merging text without spaces
+                    // Also replace newlines with spaces just in case
+                    return (el as HTMLElement).innerText?.replace(/\n/g, ' ').trim() || '';
+                }).filter(t => t.length > 0);
             });
 
             return suggestions;
@@ -52,15 +62,15 @@ export class YahooScraper {
                 await this.page.goto(searchUrl);
                 await this.page.waitForLoadState('domcontentloaded');
 
-                // Wait for results container (short timeout to be responsive)
+                // Wait for results container (increased timeout to handle slow pages)
                 try {
-                    await this.page.waitForSelector('.sw-Card__titleMain', { timeout: 3000 });
+                    await this.page.waitForSelector('.sw-Card__titleMain', { timeout: 5000 });
                 } catch (e) {
                     // If element not found, check if it's a valid "No Results" page
                     const bodyText = await this.page.textContent('body');
                     if (bodyText?.includes('一致する情報は見つかりませんでした')) {
-                        // Truly 0 results
-                        break;
+                        // Potentially temporary - throw to allow retry
+                        throw new Error('Yahoo Search returned no results (Possible temporary issue)');
                     } else if (bodyText?.includes('一時的にアクセスできません') || bodyText?.includes('二段階認証')) {
                         // CAPTCHA or Ban detection
                         throw new Error('Yahoo Search Blocked/Captcha detected');

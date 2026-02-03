@@ -31,15 +31,32 @@ const scraperService = new ScraperService();
 io.on('connection', (socket) => {
     console.log('Client connected');
 
-    socket.on('start', async (data: { keyword: string, customWords: string, threshold?: number }) => {
-        console.log('Start command received', data);
-        const { keyword, customWords, threshold = 3 } = data;
-        const customWordsList = customWords ? customWords.split(/[\s|　]+/).filter(s => s.length > 0) : [];
+    // Phase 1: Get Suggestions
+    socket.on('getSuggestions', async (data: { keyword: string, verificationMode?: boolean }) => {
+        console.log('Suggestions requested', data);
+        const { keyword, verificationMode = false } = data;
 
-        // Read Verification Mode from Env
-        const verificationMode = process.env.VERIFICATION_MODE === 'true';
+        const envVerification = process.env.VERIFICATION_MODE === 'true';
+        const isVerify = verificationMode || envVerification;
 
-        await scraperService.start(keyword, customWordsList, socket, threshold, verificationMode);
+        await scraperService.getSuggestionsOnly(keyword, socket, isVerify);
+    });
+
+    // Phase 2: Start Analysis
+    socket.on('startAnalysis', async (data: {
+        keywords: string[],
+        threshold?: number,
+        customWords?: string,
+        baseKeyword?: string
+    }) => {
+        console.log('Analysis requested', data.keywords.length + ' keywords');
+        const { keywords, threshold = 3, customWords = '', baseKeyword = '' } = data;
+
+        const customWordsArray = customWords
+            ? customWords.split(/[\s|　]+/).filter(w => w.length > 0)
+            : [];
+
+        await scraperService.analyzeKeywords(keywords, socket, threshold, customWordsArray, baseKeyword);
     });
 
     socket.on('stop', async () => {

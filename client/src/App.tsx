@@ -9,20 +9,30 @@ interface Result {
   [key: string]: string;
 }
 
+type Phase = 'input' | 'selection' | 'analysis' | 'complete';
+
 function App() {
-  const [keyword, setKeyword] = useState('');
+  // Phase management
+  const [phase, setPhase] = useState<Phase>('input');
+  const [baseKeyword, setBaseKeyword] = useState('');
+
+  // Phase 2 inputs (shown after suggestions collected)
   const [customWords, setCustomWords] = useState('');
   const [threshold, setThreshold] = useState(3);
-  // Verification Mode is now env var only
+
+  // Suggestion state
+  const [suggestionGroups, setSuggestionGroups] = useState<{ [key: string]: string[] }>({});
+  const [allSuggestions, setAllSuggestions] = useState<string[]>([]);
+  const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set());
+
+  // Analysis state
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [results, setResults] = useState<Result[]>([]);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0, label: 'Standard' });
+  const [progress, setProgress] = useState({ current: 0, total: 0, label: '待機中' });
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
-  // Modal State
+  // Modal state
   const [selectedResult, setSelectedResult] = useState<Result | null>(null);
 
   const logContainerRef = useRef<HTMLDivElement>(null);
@@ -33,17 +43,23 @@ function App() {
     });
 
     socket.on('status', (data: any) => {
-      if (data.state === 'running') {
-        setIsRunning(true);
+      console.log('[DEBUG] Status event received:', data);
+      if (data.state === 'collecting') {
         setIsRunning(true);
         setLogs([]);
-        setResults([]);
-        setSuggestions([]);
-        setShowSuggestions(false);
-        setDownloadUrl(null);
-        setProgress({ current: 0, total: 0, label: '開始中...' });
-      } else if (data.state === 'idle') {
+        setProgress({ current: 0, total: 0, label: 'サジェスト収集中...' });
+      } else if (data.state === 'suggestions_done') {
         setIsRunning(false);
+        setPhase('selection');
+        setProgress({ current: 0, total: 0, label: 'キーワード選択待ち' });
+      } else if (data.state === 'analyzing') {
+        console.log('[DEBUG] Setting isRunning to true');
+        setIsRunning(true);
+        setPhase('analysis');
+        setProgress({ current: 0, total: 0, label: '分析中...' });
+      } else if (data.state === 'finished') {
+        setIsRunning(false);
+        setPhase('complete');
         if (data.downloadUrl) setDownloadUrl(data.downloadUrl);
         setProgress(p => ({ ...p, label: '完了' }));
       }
@@ -52,9 +68,9 @@ function App() {
     socket.on('progress', (data: any) => {
       if (data.phase === 'suggestions') {
         setProgress({
-          current: 0,
-          total: 0,
-          label: `サジェスト収集中... (${data.char}) - 発見数: ${data.count}`
+          current: data.current || 0,
+          total: data.total || 0,
+          label: `サジェスト収集中... (${data.char}行) - ${data.count}件`
         });
       } else if (data.phase === 'analysis') {
         setProgress({
@@ -70,7 +86,16 @@ function App() {
     });
 
     socket.on('suggestionList', (list: string[]) => {
-      setSuggestions(list);
+      setAllSuggestions(list);
+      setSelectedKeywords(new Set(list)); // Auto-select all
+    });
+
+    socket.on('suggestionGroups', (groups: { [key: string]: string[] }) => {
+      setSuggestionGroups(groups);
+      // Flatten groups to get all suggestions
+      const allWords = Object.values(groups).flat();
+      setAllSuggestions(allWords);
+      setSelectedKeywords(new Set(allWords)); // Auto-select all
     });
 
     socket.on('totalKeywords', (total: number) => {
@@ -83,6 +108,8 @@ function App() {
       socket.off('progress');
       socket.off('result');
       socket.off('totalKeywords');
+      socket.off('suggestionList');
+      socket.off('suggestionGroups');
     };
   }, []);
 
@@ -93,31 +120,48 @@ function App() {
     }
   }, [logs]);
 
-  const handleStart = () => {
-    if (!keyword) return;
-    socket.emit('start', { keyword, customWords, threshold });
+  const handleGetSuggestions = () => {
+    if (!baseKeyword) return;
+    socket.emit('getSuggestions', { keyword: baseKeyword });
+  };
+
+  const handleStartAnalysis = () => {
+    if (selectedKeywords.size === 0) return;
+    socket.emit('startAnalysis', {
+      keywords: Array.from(selectedKeywords),
+      threshold,
+      customWords,
+      baseKeyword
+    });
   };
 
   const handleStop = () => {
     socket.emit('stop');
   };
 
-  // Generate Prompt
-  const generatePrompt = (r: Result) => {
-    let prompt = `キーワード「${r.keyword}」について記事を書きたいです。\n以下は現在の上位記事のタイトルです。\n\n`;
-    for (let i = 1; i <= 5; i++) {
-      if (r[`title_${i}`]) {
-        prompt += `${i}. ${r[`title_${i}`]}\n`;
-      }
-    }
-    prompt += `\nこれらを踏まえて、検索意図を満たしつつ、差別化できる記事構成案（タイトル案・見出し構成）を作成してください。`;
-    return prompt;
+  const handleSelectAll = () => {
+    setSelectedKeywords(new Set(allSuggestions));
   };
 
-  const handleCopyPrompt = (r: Result) => {
-    const prompt = generatePrompt(r);
-    navigator.clipboard.writeText(prompt);
-    alert('Gemini用のプロンプトをコピーしました！Geminiを開いて貼り付けてください。');
+  const handleUnselectAll = () => {
+    setSelectedKeywords(new Set());
+  };
+
+  const toggleKeyword = (keyword: string) => {
+    const newSet = new Set(selectedKeywords);
+    if (newSet.has(keyword)) {
+      newSet.delete(keyword);
+    } else {
+      newSet.add(keyword);
+    }
+    setSelectedKeywords(newSet);
+  };
+
+  // Generate Yahoo search URL with intitle for each word
+  const getYahooSearchUrl = (keyword: string) => {
+    const parts = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
+    const query = parts.map(p => `intitle:${p}`).join(' ');
+    return `https://search.yahoo.co.jp/search?p=${encodeURIComponent(query)}`;
   };
 
   const progressPercent = progress.total > 0 && progress.current > 0
@@ -128,67 +172,52 @@ function App() {
     <div className="container">
       <h1>Yahoo Rival-less Keyword Finder</h1>
 
+      {/* Tool Description */}
       <div className="card" style={{ marginBottom: '2rem', fontSize: '0.9rem', color: '#cbd5e1' }}>
         <h3 style={{ marginTop: 0, marginBottom: '0.5rem', color: '#fff' }}>このツールの仕様</h3>
         <ul style={{ paddingLeft: '1.5rem', margin: 0, lineHeight: '1.6' }}>
           <li>検索エンジン：<strong>Yahoo! JAPAN</strong></li>
-          <li><strong>Step 1</strong>: 「狙っているワード」+「あいうえお（五十音）」検索で、虫眼鏡のサジェストワードを自動収集します。</li>
-          <li><strong>Step 2</strong>: 「狙っているワード」+「サジェストワード」で検索し、ライバル記事の数（すべてのキーワードがタイトルに含まれる記事数）を調査します。</li>
-          <li>検索結果の最大取得ページは <strong>2ページ</strong> までです。</li>
+          <li><strong>Phase 1</strong>: 「狙っているワード」を入力してサジェストワードを収集します（五十音50音で検索）</li>
+          <li><strong>Phase 2</strong>: 収集したサジェストから分析対象を選択し、ライバル記事数を調査します</li>
+          <li>検索結果の最大取得ページは <strong>2ページ</strong> までです</li>
+          <li>100件ごとに1分間の休憩を挟みます（ブロック対策）</li>
         </ul>
       </div>
 
+      {/* Phase 1: Input */}
       <div className="card">
+        <h3>Phase 1: サジェスト収集</h3>
         <div className="controls">
           <div className="input-group">
             <label>狙っているワード</label>
             <input
               type="text"
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
+              value={baseKeyword}
+              onChange={e => setBaseKeyword(e.target.value)}
               placeholder="例: ミラノオリンピック"
-              disabled={isRunning}
+              disabled={isRunning || phase !== 'input'}
             />
-          </div>
-          <div className="input-group" style={{ flex: '1 1 100%' }}>
-            <label>ライバル記事タイトルに含まれているかチェックしたいキーワード（オプション）</label>
-            <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: '0 0 0.5rem 0' }}>例）ミラノオリンピック → ミラノも対象にしたい場合は「ミラノ」と記載</p>
-            <input
-              type="text"
-              value={customWords}
-              onChange={e => setCustomWords(e.target.value)}
-              placeholder="例: ミラノ オリンピック"
-              disabled={isRunning}
-            />
-          </div>
-          <div className="input-group" style={{ flex: '1 1 100%' }}>
-            <label>ライバルレス判定基準</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#f8fafc' }}>
-              <span>すべてのキーワードがタイトルに含まれる記事が</span>
-              <input
-                type="number"
-                value={threshold}
-                onChange={e => setThreshold(Number(e.target.value))}
-                min="0"
-                max="20"
-                disabled={isRunning}
-                style={{ width: '60px', textAlign: 'center' }}
-              />
-              <span>記事以内</span>
-            </div>
           </div>
           <div style={{ width: '100%', marginTop: '1rem' }}>
-            {!isRunning ? (
-              <button onClick={handleStart} disabled={!keyword} style={{ width: '100%' }}>実行</button>
+            {phase === 'input' ? (
+              <button
+                onClick={handleGetSuggestions}
+                disabled={!baseKeyword || isRunning}
+                style={{ width: '100%' }}
+              >
+                サジェスト取得開始
+              </button>
             ) : (
-              <button className="stop" onClick={handleStop} style={{ width: '100%' }}>停止</button>
+              <button disabled style={{ width: '100%', opacity: 0.5 }}>
+                サジェスト取得済み
+              </button>
             )}
           </div>
         </div>
 
         <div className="progress-section">
           <div className="progress-label">
-            <span>{progress.label === 'Standard' ? '待機中' : progress.label}</span>
+            <span>{progress.label}</span>
             <span>{Math.round(progressPercent)}%</span>
           </div>
           <div className="progress-track">
@@ -197,6 +226,118 @@ function App() {
         </div>
       </div>
 
+      {/* Phase 2: Selection */}
+      {(phase === 'selection' || phase === 'analysis' || phase === 'complete') && (
+        <div className="card">
+          <h3>Phase 2: キーワード選択と分析</h3>
+
+          {/* Phase 2 Inputs */}
+          <div className="controls" style={{ marginBottom: '1.5rem' }}>
+            <div className="input-group" style={{ flex: '1 1 100%' }}>
+              <label>ライバル記事タイトルに含まれているかチェックしたいキーワード（オプション）</label>
+              <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: '0 0 0.5rem 0' }}>
+                例）ミラノオリンピック → ミラノも対象にしたい場合は「ミラノ」と記載
+              </p>
+              <input
+                type="text"
+                value={customWords}
+                onChange={e => setCustomWords(e.target.value)}
+                placeholder="例: ミラノ オリンピック"
+                disabled={phase !== 'selection'}
+              />
+            </div>
+            <div className="input-group" style={{ flex: '1 1 100%' }}>
+              <label>ライバルレス判定基準</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#f8fafc' }}>
+                <span>すべてのキーワードがタイトルに含まれる記事が</span>
+                <input
+                  type="number"
+                  value={threshold}
+                  onChange={e => setThreshold(Number(e.target.value))}
+                  min="0"
+                  max="20"
+                  disabled={phase !== 'selection'}
+                  style={{ width: '60px', textAlign: 'center' }}
+                />
+                <span>記事以内</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Keyword Selection Grid */}
+          {phase === 'selection' && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <h4 style={{ margin: 0 }}>
+                  分析対象キーワード選択 ({selectedKeywords.size} / {allSuggestions.length})
+                </h4>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button onClick={handleSelectAll} className="outline-btn">全選択</button>
+                  <button onClick={handleUnselectAll} className="outline-btn">全解除</button>
+                </div>
+              </div>
+
+              <div className="checkbox-grid-container">
+                {Object.entries(suggestionGroups).map(([char, words]) => (
+                  <div key={char} className="group-section">
+                    <h4 className="group-title">{char}行</h4>
+                    <div className="checkbox-grid">
+                      {words.map(word => (
+                        <label
+                          key={word}
+                          className={`checkbox-item ${selectedKeywords.has(word) ? 'checked' : ''}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedKeywords.has(word)}
+                            onChange={() => toggleKeyword(word)}
+                          />
+                          <span>{word}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: '1.5rem', textAlign: 'center' }}>
+                <button
+                  onClick={handleStartAnalysis}
+                  disabled={selectedKeywords.size === 0 || isRunning}
+                  style={{ padding: '1rem 3rem', fontSize: '1.1rem' }}
+                >
+                  選択した {selectedKeywords.size} 件で分析開始
+                </button>
+              </div>
+            </>
+          )}
+
+          {(phase === 'analysis' || phase === 'complete') && (
+            <div className="progress-section" style={{ marginTop: '1rem' }}>
+              <div className="progress-label">
+                <span>{progress.label}</span>
+                <span>{Math.round(progressPercent)}%</span>
+              </div>
+              <div className="progress-track">
+                <div className="progress-bar" style={{ width: `${progressPercent}%` }}></div>
+              </div>
+              {isRunning && (
+                <div style={{ marginTop: '1rem', textAlign: 'center' }}>
+                  <button
+                    onClick={handleStop}
+                    className="stop-btn"
+                    style={{ padding: '0.75rem 2rem', fontSize: '1rem', backgroundColor: '#ef4444', borderColor: '#ef4444' }}
+                  >
+                    ⏹️ 停止
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Results Section */}
       <div className="card">
         <div className="status-bar">
           <div className="status-indicator">
@@ -219,57 +360,32 @@ function App() {
               onClick={() => setSelectedResult(r)}
               style={{ cursor: 'pointer' }}
             >
-              <div className="result-keyword">{r.keyword}</div>
-              <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+              <a
+                href={getYahooSearchUrl(r.keyword)}
+                target="_blank"
+                rel="noreferrer"
+                className="result-keyword"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {r.keyword}
+              </a>
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.5rem' }}>
                 Top 1: {r.title_1 ? r.title_1.substring(0, 30) + '...' : 'なし'}
               </div>
               <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#38bdf8' }}>
-                クリックしてAI分析 &rarr;
+                クリックして詳細を確認 →
               </div>
             </div>
           ))}
         </div>
         {results.length === 0 && !isRunning && (
           <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem' }}>
-            結果はまだありません。「実行」ボタンを押して開始してください。
+            結果はまだありません
           </div>
         )}
       </div>
 
-      {/* Suggestions List Card */}
-      {
-        suggestions.length > 0 && (
-          <div className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>取得した関連キーワード ({suggestions.length})</h3>
-              <button
-                onClick={() => setShowSuggestions(!showSuggestions)}
-                style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
-              >
-                {showSuggestions ? 'リストを隠す' : 'リストを表示'}
-              </button>
-            </div>
-
-            {showSuggestions && (
-              <div className="keyword-list" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', maxHeight: '300px', overflowY: 'auto' }}>
-                {suggestions.map((k, i) => (
-                  <span key={i} style={{
-                    background: '#334155',
-                    padding: '2px 8px',
-                    borderRadius: '4px',
-                    fontSize: '0.8rem',
-                    color: '#e2e8f0',
-                    border: '1px solid #475569'
-                  }}>
-                    {k}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )
-      }
-
+      {/* System Logs */}
       <div className="card">
         <h3>システムログ</h3>
         <div className="logs" ref={logContainerRef}>
@@ -280,54 +396,49 @@ function App() {
       </div>
 
       {/* Detail Modal */}
-      {
-        selectedResult && (
-          <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
-            <div className="modal-content" onClick={e => e.stopPropagation()}>
-              <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
+      {selectedResult && (
+        <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
 
-              <h2>{selectedResult.keyword}</h2>
+            <h2>{selectedResult.keyword}</h2>
 
-              <div className="modal-actions">
-                <button onClick={() => handleCopyPrompt(selectedResult)} style={{ marginRight: '1rem' }}>
-                  1. Gemini用プロンプトをコピー
-                </button>
-                <a
-                  href="https://gemini.google.com/app"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="button-link"
-                >
-                  2. Geminiを開く
-                </a>
-              </div>
+            <div className="modal-actions">
+              <a
+                href={getYahooSearchUrl(selectedResult.keyword)}
+                target="_blank"
+                rel="noreferrer"
+                className="button-link"
+              >
+                Yahoo検索で確認 (intitle検索)
+              </a>
+            </div>
 
-              <div className="result-details">
-                <h3>上位の検索結果</h3>
-                {[1, 2, 3, 4, 5].map(num => {
-                  const title = selectedResult[`title_${num}`];
-                  const url = selectedResult[`url_${num}`]; // Raw URL
-                  if (!title) return null;
-                  return (
-                    <div key={num} className="detail-item">
-                      <span className="rank-badge">{num}</span>
-                      <div className="detail-content">
-                        <div className="detail-title">{title}</div>
-                        {url && (
-                          <a href={url} target="_blank" rel="noreferrer" className="detail-link">
-                            {url}
-                          </a>
-                        )}
-                      </div>
+            <div className="result-details">
+              <h3>上位の検索結果</h3>
+              {[1, 2, 3, 4, 5].map(num => {
+                const title = selectedResult[`title_${num}`];
+                const url = selectedResult[`url_${num}`];
+                if (!title) return null;
+                return (
+                  <div key={num} className="detail-item">
+                    <span className="rank-badge">{num}</span>
+                    <div className="detail-content">
+                      <div className="detail-title">{title}</div>
+                      {url && (
+                        <a href={url} target="_blank" rel="noreferrer" className="detail-link">
+                          {url}
+                        </a>
+                      )}
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        )
-      }
-    </div >
+        </div>
+      )}
+    </div>
   );
 }
 
