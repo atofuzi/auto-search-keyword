@@ -47,16 +47,17 @@ io.on('connection', (socket) => {
         keywords: string[],
         threshold?: number,
         customWords?: string,
-        baseKeyword?: string
+        baseKeyword?: string,
+        useCache?: boolean
     }) => {
         console.log('Analysis requested', data.keywords.length + ' keywords');
-        const { keywords, threshold = 3, customWords = '', baseKeyword = '' } = data;
+        const { keywords, threshold = 3, customWords = '', baseKeyword = '', useCache = true } = data;
 
         const customWordsArray = customWords
             ? customWords.split(/[\s|　]+/).filter(w => w.length > 0)
             : [];
 
-        await scraperService.analyzeKeywords(keywords, socket, threshold, customWordsArray, baseKeyword);
+        await scraperService.analyzeKeywords(keywords, socket, threshold, customWordsArray, baseKeyword, useCache);
     });
 
     socket.on('stop', async () => {

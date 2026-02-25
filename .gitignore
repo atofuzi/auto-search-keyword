@@ -5,3 +5,9 @@ dist
 *.log
 .DS_Store
 .env
+search_cache.json
+error_screenshot_*.png
+test_suggestions.ts
+src/test_suggest.js
+patch_app.js
+.playwright-mcp/

@@ -3,6 +3,7 @@ import { HIRAGANA_LIST, sleep } from './utils';
 import { isRivalLess } from './analyzer';
 import { createObjectCsvWriter } from 'csv-writer';
 import * as path from 'path';
+import * as fs from 'fs';
 import { Server } from 'socket.io'; // Or just EventEmitter
 
 // Define event types if needed, but for now we interact via Socket directly or callbacks
@@ -11,9 +12,31 @@ import { Server } from 'socket.io'; // Or just EventEmitter
 export class ScraperService {
     private scraper: YahooScraper;
     private isRunning: boolean = false;
+    private cacheFilePath: string = path.resolve(process.cwd(), 'search_cache.json');
+    private searchCache: { [keyword: string]: any } = {};
 
     constructor() {
         this.scraper = new YahooScraper();
+        this.loadCache();
+    }
+
+    private loadCache() {
+        try {
+            if (fs.existsSync(this.cacheFilePath)) {
+                const data = fs.readFileSync(this.cacheFilePath, 'utf-8');
+                this.searchCache = JSON.parse(data);
+            }
+        } catch (e) {
+            console.error('Failed to load cache', e);
+        }
+    }
+
+    private saveCache() {
+        try {
+            fs.writeFileSync(this.cacheFilePath, JSON.stringify(this.searchCache, null, 2), 'utf-8');
+        } catch (e) {
+            console.error('Failed to save cache', e);
+        }
     }
 
     async stop() {
@@ -30,7 +53,7 @@ export class ScraperService {
 
         try {
             socket.emit('status', { state: 'collecting', message: `Collecting suggestions for: "${baseKeyword}"` });
-            await this.scraper.init(true);
+            await this.scraper.init(false); // Enable headful mode
 
             const chars_to_check = verificationMode ? HIRAGANA_LIST.slice(0, 10) : HIRAGANA_LIST;
             const groupedSuggestions: { [key: string]: string[] } = {};
@@ -193,28 +216,25 @@ export class ScraperService {
                 await csvWriter.writeRecords([record]);
                 socket.emit('result', record);
                 socket.emit('log', `ライバルレス発見 (${matchCount}件): ${keyword}`);
+
+                // Save to cache as rival-less
+                this.searchCache[keyword] = { rivalLess: true, record };
+            } else {
+                // Save to cache as not rival-less
+                this.searchCache[keyword] = { rivalLess: false };
             }
+            this.saveCache();
 
             return true; // Success
 
         } catch (e: any) {
-            if (e.message && e.message.includes('Blocked/Captcha')) {
-                const minutes = 3;
-                socket.emit('log', `⚠️ Block detected! Cooling down for ${minutes} minutes... (Will retry "${keyword}")`);
-
-                // Interruptible sleep - check every second if we should stop
-                const totalSeconds = minutes * 60;
-                for (let i = 0; i < totalSeconds; i++) {
-                    if (!this.isRunning) {
-                        socket.emit('log', `⏹️ Cooldown interrupted by user.`);
-                        return true; // Don't retry if stopped
-                    }
-                    await sleep(1000);
-                }
-
-                socket.emit('log', `▶️ Adding to retry list: ${keyword}`);
-                return false; // Add to retry list
-            } else if (e.message && (e.message.includes('temporary issue') || e.message.includes('incompatible'))) {
+            if (e.message && (e.message.includes('Blocked/Captcha') || e.message.includes('incompatible'))) {
+                socket.emit('log', `⚠️ Block/CAPTCHA detected! Stopping analysis strictly to prompt IP change.`);
+                socket.emit('blockDetected');
+                // Force stop
+                this.isRunning = false;
+                return false; // Interrupt the loop entirely
+            } else if (e.message && e.message.includes('temporary issue')) {
                 socket.emit('log', `⚠️ Temporary issue detected for "${keyword}". Adding to retry list.`);
                 return false; // Add to retry list
             } else {
@@ -232,7 +252,8 @@ export class ScraperService {
         socket: any,
         threshold: number = 3,
         customCheckWords: string[] = [],
-        baseKeyword: string = ''
+        baseKeyword: string = '',
+        useCache: boolean = true
     ) {
         if (this.isRunning) return;
         this.isRunning = true;
@@ -263,28 +284,96 @@ export class ScraperService {
         const rivalLessKeywords: any[] = [];
 
         try {
-            await this.scraper.init(true);
+            await this.scraper.init(false); // Enable headful mode
             socket.emit('log', '--- Starting Analysis ---');
             socket.emit('totalKeywords', keywords.length);
 
             let count = 0;
             const retryList: string[] = [];
 
+            if (!useCache) {
+                socket.emit('log', `🗑️ キャッシュをクリアしました`);
+                this.searchCache = {};
+                this.saveCache();
+            } else {
+                // Reload cache to be safe
+                this.loadCache();
+            }
+
             // Process all keywords
             for (const keyword of keywords) {
                 if (!this.isRunning) break;
-                count++;
 
-                // Batching: Cooldown every 100 keywords
-                if (count > 0 && count % 100 === 0) {
-                    socket.emit('log', `⏳ Batch limit (100) reached. Cooling down for 1 minute...`);
-                    await sleep(60000); // 1 minute
-                    socket.emit('log', `▶️ Resuming analysis...`);
+                // Check Cache
+                if (this.searchCache[keyword]) {
+                    socket.emit('log', `⚡ キャッシュから復元 (スキップ): ${keyword}`);
+                    const cachedData = this.searchCache[keyword];
+                    if (cachedData.rivalLess && cachedData.record) {
+                        rivalLessKeywords.push(cachedData.record);
+                        await csvWriter.writeRecords([cachedData.record]);
+                        socket.emit('result', cachedData.record);
+                    }
+                    // emit progress even if skipped
+                    socket.emit('progress', {
+                        phase: 'analysis',
+                        current: keywords.indexOf(keyword) + 1,
+                        total: keywords.length,
+                        keyword,
+                        etaSeconds: 0
+                    });
+                    continue; // Skip actual scraping and do NOT increment 'count'
                 }
 
-                socket.emit('progress', { phase: 'analysis', current: count, total: keywords.length, keyword });
+                // Increment count ONLY for actual API requests to Yahoo
+                count++;
 
-                // Clear cookies to avoid session tracking/bot detection
+                // Batching: Cooldown & Session Reset every 10 keywords
+                if (count > 0 && count % 10 === 0) {
+                    const pauseMinutes = 1;
+                    socket.emit('log', `⏳ 一定件数(${count}件)に到達しました。安全のため ${pauseMinutes} 分間の一時休憩に入ります...`);
+                    socket.emit('log', `(※停止ボタンを押せばここで終了し、次回は続きから再開できます)`);
+
+                    // Close browser to clear session fully
+                    await this.scraper.close();
+                    socket.emit('log', `[Scraper] ブラウザセッションを破棄しました`);
+
+                    for (let i = 0; i < pauseMinutes * 60; i++) {
+                        if (!this.isRunning) {
+                            socket.emit('log', `⏹️ 休憩中にユーザー操作で停止されました。`);
+                            socket.emit('batchPause', { active: false });
+                            return; // User stopped the process completely
+                        }
+                        // Emit remaining seconds to UI
+                        socket.emit('batchPause', { active: true, remainingSeconds: (pauseMinutes * 60) - i, totalSeconds: pauseMinutes * 60 });
+                        await sleep(1000);
+                    }
+
+                    if (!this.isRunning) {
+                        socket.emit('batchPause', { active: false });
+                        return;
+                    }
+
+                    // Hide modal
+                    socket.emit('batchPause', { active: false });
+
+                    // Re-init browser after pause
+                    socket.emit('log', `▶️ 休憩終了。新しいブラウザセッションで分析を再開します...`);
+                    await this.scraper.init(false); // Enable headful mode
+                }
+
+                const remaining = keywords.length - (keywords.indexOf(keyword) + 1);
+                // 1 search ~ 6 seconds, + 60s pause every 10 searches remaining.
+                const estimatedSeconds = (remaining * 6) + (Math.floor(remaining / 10) * 60);
+
+                socket.emit('progress', {
+                    phase: 'analysis',
+                    current: keywords.indexOf(keyword) + 1,
+                    total: keywords.length,
+                    keyword,
+                    etaSeconds: estimatedSeconds
+                });
+
+                // If not cached, clear cookies before searching
                 await this.scraper.clearCookies();
 
                 const success = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
@@ -294,7 +383,7 @@ export class ScraperService {
                 }
 
                 // Random delay to avoid rate limiting
-                const delay = 2000 + Math.random() * 1000; // 2-3 seconds
+                const delay = 5000 + Math.random() * 7000; // 5-12 seconds random delay
                 await sleep(delay);
             }
 
@@ -306,13 +395,19 @@ export class ScraperService {
                     if (!this.isRunning) break;
                     count++;
 
-                    socket.emit('progress', { phase: 'analysis', current: count, total: keywords.length + retryList.length, keyword });
+                    socket.emit('progress', {
+                        phase: 'analysis',
+                        current: count,
+                        total: keywords.length + retryList.length,
+                        keyword,
+                        etaSeconds: 0
+                    });
                     socket.emit('log', `🔄 リトライ: ${keyword}`);
 
                     await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
 
                     // Random delay
-                    const delay = 2000 + Math.random() * 1000;
+                    const delay = 5000 + Math.random() * 7000; // 5-12 seconds random delay
                     await sleep(delay);
                 }
             }
@@ -347,7 +442,7 @@ export class ScraperService {
         // Notify client about start
         socket.emit('status', { state: 'running', message: `Starting analysis for: "${baseKeyword}"` });
 
-        await this.scraper.init(true);
+        await this.scraper.init(false); // Enable headful mode
 
         const csvWriter = createObjectCsvWriter({
             path: outputPath,

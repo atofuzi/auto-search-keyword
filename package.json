@@ -21,6 +21,8 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "playwright": "^1.58.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "socket.io": "^4.8.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"

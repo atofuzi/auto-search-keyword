@@ -29,11 +29,19 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [results, setResults] = useState<Result[]>([]);
-  const [progress, setProgress] = useState({ current: 0, total: 0, label: '待機中' });
+  const [phase1Progress, setPhase1Progress] = useState({ current: 0, total: 0, label: '待機中' });
+  const [phase2Progress, setPhase2Progress] = useState({ current: 0, total: 0, label: '待機中', etaSeconds: 0 });
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
   // Modal state
   const [selectedResult, setSelectedResult] = useState<Result | null>(null);
+
+  // Pause Modal state
+  const [pauseState, setPauseState] = useState<{ active: boolean, remainingSeconds: number, totalSeconds: number }>({ active: false, remainingSeconds: 0, totalSeconds: 0 });
+
+  // Confirmation Modals
+  const [showCacheConfirm, setShowCacheConfirm] = useState(false);
+  const [showBlockModal, setShowBlockModal] = useState(false);
 
   const logContainerRef = useRef<HTMLDivElement>(null);
 
@@ -47,36 +55,37 @@ function App() {
       if (data.state === 'collecting') {
         setIsRunning(true);
         setLogs([]);
-        setProgress({ current: 0, total: 0, label: 'サジェスト収集中...' });
+        setPhase1Progress({ current: 0, total: 0, label: 'サジェスト収集中...' });
       } else if (data.state === 'suggestions_done') {
         setIsRunning(false);
         setPhase('selection');
-        setProgress({ current: 0, total: 0, label: 'キーワード選択待ち' });
+        setPhase1Progress(p => ({ ...p, label: '完了' }));
       } else if (data.state === 'analyzing') {
         console.log('[DEBUG] Setting isRunning to true');
         setIsRunning(true);
         setPhase('analysis');
-        setProgress({ current: 0, total: 0, label: '分析中...' });
+        setPhase2Progress({ current: 0, total: 0, label: '分析中...', etaSeconds: 0 });
       } else if (data.state === 'finished') {
         setIsRunning(false);
         setPhase('complete');
         if (data.downloadUrl) setDownloadUrl(data.downloadUrl);
-        setProgress(p => ({ ...p, label: '完了' }));
+        setPhase2Progress(p => ({ ...p, label: '完了' }));
       }
     });
 
     socket.on('progress', (data: any) => {
       if (data.phase === 'suggestions') {
-        setProgress({
+        setPhase1Progress({
           current: data.current || 0,
           total: data.total || 0,
           label: `サジェスト収集中... (${data.char}行) - ${data.count}件`
         });
       } else if (data.phase === 'analysis') {
-        setProgress({
+        setPhase2Progress({
           current: data.current,
           total: data.total,
-          label: `分析中: ${data.keyword} (${data.current}/${data.total})`
+          label: `分析中: ${data.keyword} (${data.current}/${data.total})`,
+          etaSeconds: data.etaSeconds || 0
         });
       }
     });
@@ -99,7 +108,20 @@ function App() {
     });
 
     socket.on('totalKeywords', (total: number) => {
-      setProgress(p => ({ ...p, total }));
+      setPhase1Progress(p => ({ ...p, total }));
+    });
+
+    socket.on('batchPause', (data: { active: boolean, remainingSeconds?: number, totalSeconds?: number }) => {
+      setPauseState({
+        active: data.active,
+        remainingSeconds: data.remainingSeconds || 0,
+        totalSeconds: data.totalSeconds || 1
+      });
+    });
+
+    socket.on('blockDetected', () => {
+      setShowBlockModal(true);
+      setIsRunning(false); // Force stop frontend state
     });
 
     return () => {
@@ -110,6 +132,8 @@ function App() {
       socket.off('totalKeywords');
       socket.off('suggestionList');
       socket.off('suggestionGroups');
+      socket.off('batchPause');
+      socket.off('blockDetected');
     };
   }, []);
 
@@ -125,18 +149,25 @@ function App() {
     socket.emit('getSuggestions', { keyword: baseKeyword });
   };
 
-  const handleStartAnalysis = () => {
+  const handleStartAnalysisClick = () => {
     if (selectedKeywords.size === 0) return;
+    setShowCacheConfirm(true); // Always ask to confirm cache usage
+  };
+
+  const confirmStartAnalysis = (useCache: boolean) => {
+    setShowCacheConfirm(false);
     socket.emit('startAnalysis', {
       keywords: Array.from(selectedKeywords),
       threshold,
       customWords,
-      baseKeyword
+      baseKeyword,
+      useCache
     });
   };
 
   const handleStop = () => {
     socket.emit('stop');
+    setIsRunning(false);
   };
 
   const handleSelectAll = () => {
@@ -164,8 +195,19 @@ function App() {
     return `https://search.yahoo.co.jp/search?p=${encodeURIComponent(query)}`;
   };
 
-  const progressPercent = progress.total > 0 && progress.current > 0
-    ? (progress.current / progress.total) * 100
+  const formatEta = (seconds: number) => {
+    if (seconds <= 0) return '';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `(想定残り時間: ${m}分 ${s}秒)`;
+  };
+
+  const phase1Percent = phase1Progress.total > 0 && phase1Progress.current > 0
+    ? (phase1Progress.current / phase1Progress.total) * 100
+    : 0;
+
+  const phase2Percent = phase2Progress.total > 0 && phase2Progress.current > 0
+    ? (phase2Progress.current / phase2Progress.total) * 100
     : 0;
 
   return (
@@ -215,15 +257,17 @@ function App() {
           </div>
         </div>
 
-        <div className="progress-section">
-          <div className="progress-label">
-            <span>{progress.label}</span>
-            <span>{Math.round(progressPercent)}%</span>
+        {phase === 'input' && (
+          <div className="progress-section">
+            <div className="progress-label">
+              <span>{phase1Progress.label}</span>
+              <span>{Math.round(phase1Percent)}%</span>
+            </div>
+            <div className="progress-track">
+              <div className="progress-bar" style={{ width: `${phase1Percent}%` }}></div>
+            </div>
           </div>
-          <div className="progress-track">
-            <div className="progress-bar" style={{ width: `${progressPercent}%` }}></div>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Phase 2: Selection */}
@@ -256,7 +300,7 @@ function App() {
                   onChange={e => setThreshold(Number(e.target.value))}
                   min="0"
                   max="20"
-                  disabled={phase !== 'selection'}
+                  disabled={isRunning || phase !== 'selection'}
                   style={{ width: '60px', textAlign: 'center' }}
                 />
                 <span>記事以内</span>
@@ -264,16 +308,16 @@ function App() {
             </div>
           </div>
 
-          {/* Keyword Selection Grid */}
-          {phase === 'selection' && (
+          {/* Keyword Selection Grid (Always visible during/after selection, but disabled if running) */}
+          {(phase === 'selection' || phase === 'analysis' || phase === 'complete') && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <h4 style={{ margin: 0 }}>
                   分析対象キーワード選択 ({selectedKeywords.size} / {allSuggestions.length})
                 </h4>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button onClick={handleSelectAll} className="outline-btn">全選択</button>
-                  <button onClick={handleUnselectAll} className="outline-btn">全解除</button>
+                  <button onClick={handleSelectAll} className="outline-btn" disabled={isRunning || phase !== 'selection'}>全選択</button>
+                  <button onClick={handleUnselectAll} className="outline-btn" disabled={isRunning || phase !== 'selection'}>全解除</button>
                 </div>
               </div>
 
@@ -291,6 +335,7 @@ function App() {
                             type="checkbox"
                             checked={selectedKeywords.has(word)}
                             onChange={() => toggleKeyword(word)}
+                            disabled={isRunning || phase !== 'selection'}
                           />
                           <span>{word}</span>
                         </label>
@@ -301,13 +346,19 @@ function App() {
               </div>
 
               <div style={{ marginTop: '1.5rem', textAlign: 'center' }}>
-                <button
-                  onClick={handleStartAnalysis}
-                  disabled={selectedKeywords.size === 0 || isRunning}
-                  style={{ padding: '1rem 3rem', fontSize: '1.1rem' }}
-                >
-                  選択した {selectedKeywords.size} 件で分析開始
-                </button>
+                {!isRunning ? (
+                  <button
+                    onClick={handleStartAnalysisClick}
+                    disabled={selectedKeywords.size === 0}
+                    style={{ padding: '1rem 3rem', fontSize: '1.1rem', backgroundColor: phase === 'analysis' || phase === 'complete' ? '#10b981' : undefined }}
+                  >
+                    {phase === 'analysis' || phase === 'complete' ? '▶️ 停止した分析を再開する' : `選択した ${selectedKeywords.size} 件で分析開始`}
+                  </button>
+                ) : (
+                  <button disabled style={{ padding: '1rem 3rem', fontSize: '1.1rem', opacity: 0.5 }}>
+                    分析実行中...
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -315,11 +366,11 @@ function App() {
           {(phase === 'analysis' || phase === 'complete') && (
             <div className="progress-section" style={{ marginTop: '1rem' }}>
               <div className="progress-label">
-                <span>{progress.label}</span>
-                <span>{Math.round(progressPercent)}%</span>
+                <span>{phase2Progress.label} {isRunning && phase2Progress.etaSeconds > 0 ? formatEta(phase2Progress.etaSeconds) : ''}</span>
+                <span>{Math.round(phase2Percent)}%</span>
               </div>
               <div className="progress-track">
-                <div className="progress-bar" style={{ width: `${progressPercent}%` }}></div>
+                <div className="progress-bar" style={{ width: `${phase2Percent}%` }}></div>
               </div>
               {isRunning && (
                 <div style={{ marginTop: '1rem', textAlign: 'center' }}>
@@ -435,6 +486,120 @@ function App() {
                 );
               })}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cache Confirmation Modal */}
+      {showCacheConfirm && (
+        <div className="modal-overlay" style={{ zIndex: 10000 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '450px' }}>
+            <h2 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#10b981' }}>
+              <span>💾</span> キャッシュの利用
+            </h2>
+            <p style={{ margin: '1rem 0' }}>
+              前回分析したキーワードの履歴（キャッシュ）が存在する場合、そのデータを再利用して続きから開始できます。
+            </p>
+            <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '2rem' }}>
+              ※初めからすべてやり直したい場合は、「キャッシュを削除してやり直す」を選択してください。
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <button
+                onClick={() => confirmStartAnalysis(true)}
+                style={{ padding: '0.75rem', fontSize: '1rem', backgroundColor: '#3b82f6', borderColor: '#3b82f6' }}
+              >
+                🔄 キャッシュを利用して再開する（推奨）
+              </button>
+              <button
+                onClick={() => confirmStartAnalysis(false)}
+                style={{ padding: '0.75rem', fontSize: '1rem', backgroundColor: '#ef4444', borderColor: '#ef4444' }}
+              >
+                🗑️ キャッシュを削除して最初からやり直す
+              </button>
+              <button
+                onClick={() => setShowCacheConfirm(false)}
+                className="outline-btn"
+                style={{ padding: '0.75rem', fontSize: '1rem' }}
+              >
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block Alert Modal */}
+      {showBlockModal && (
+        <div className="modal-overlay" style={{ zIndex: 10000 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '450px', borderTop: '4px solid #ef4444' }}>
+            <h2 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#ef4444' }}>
+              <span>🚨</span> Yahooアクセス制限（IPブロック）エラー
+            </h2>
+            <p style={{ margin: '1rem 0', fontWeight: 'bold' }}>
+              複数回の検索により、YahooからBotとして検知・ブロックされました。
+            </p>
+
+            <div style={{ textAlign: 'left', backgroundColor: '#1e293b', padding: '1.5rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
+              <h4 style={{ marginTop: 0, color: '#f8fafc' }}>【解決方法】IPアドレスを変更してください</h4>
+              <ol style={{ paddingLeft: '1.2rem', margin: 0, color: '#cbd5e1', lineHeight: '1.7' }}>
+                <li>スマートフォンのテザリングでPCをネットに繋ぎます</li>
+                <li>スマホの<strong>「機内モードをON → OFF」</strong>にして新しいIPアドレスを取得します</li>
+                <li>下記の「確認して閉じる」を押し、再度<strong>「▶️ 分析を再開する」</strong>をクリックしてください</li>
+              </ol>
+            </div>
+
+            <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 1.5rem 0' }}>
+              ※キャッシュが有効なため、IP変更後に再開すれば中断したキーワードから瞬時に再開されます。
+            </p>
+
+            <button
+              onClick={() => setShowBlockModal(false)}
+              style={{ padding: '0.75rem 2rem', fontSize: '1rem', width: '100%' }}
+            >
+              確認して閉じる
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Pause Modal */}
+      {pauseState.active && (
+        <div className="modal-overlay" style={{ zIndex: 9999 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '400px' }}>
+            <h2 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#f59e0b' }}>
+              <span>⏳</span> 一時休憩中
+            </h2>
+            <p style={{ margin: '1rem 0' }}>
+              Yahooの制限を回避するため、安全機能が作動し一時待機しています。
+            </p>
+
+            <div style={{ fontSize: '2rem', fontWeight: 'bold', margin: '1.5rem 0', color: '#38bdf8' }}>
+              残り {pauseState.remainingSeconds} 秒
+            </div>
+
+            <div className="progress-track" style={{ marginBottom: '2rem' }}>
+              <div
+                className="progress-bar"
+                style={{
+                  width: `${(pauseState.remainingSeconds / pauseState.totalSeconds) * 100}%`,
+                  transition: 'width 1s linear',
+                  backgroundColor: '#f59e0b'
+                }}
+              ></div>
+            </div>
+
+            <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '1rem' }}>
+              ここで中止しても、次回はキャッシュから即座に続きから再開できます。
+            </p>
+
+            <button
+              onClick={handleStop}
+              className="stop-btn"
+              style={{ padding: '0.75rem 2rem', fontSize: '1rem', backgroundColor: '#ef4444', borderColor: '#ef4444', width: '100%' }}
+            >
+              ⏹️ このまま終了する
+            </button>
           </div>
         </div>
       )}
