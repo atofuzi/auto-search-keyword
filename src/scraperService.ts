@@ -12,19 +12,31 @@ import { Server } from 'socket.io'; // Or just EventEmitter
 export class ScraperService {
     private scraper: YahooScraper;
     private isRunning: boolean = false;
-    private cacheFilePath: string = path.resolve(process.cwd(), 'search_cache.json');
+    private currentBaseKeyword: string = '';
     private searchCache: { [keyword: string]: any } = {};
 
     constructor() {
         this.scraper = new YahooScraper();
-        this.loadCache();
+        // Cache is loaded lazily when analysis starts for a specific base keyword
     }
 
-    private loadCache() {
+    private getCacheFilePath(baseKeyword: string): string {
+        // Sanitize base keyword for use in filename
+        const safe = baseKeyword.replace(/[\s/\\:*?"<>|　]+/g, '_').replace(/^_+|_+$/g, '');
+        return path.resolve(process.cwd(), `cache_${safe}.json`);
+    }
+
+    private loadCache(baseKeyword: string) {
+        this.currentBaseKeyword = baseKeyword;
+        this.searchCache = {};
         try {
-            if (fs.existsSync(this.cacheFilePath)) {
-                const data = fs.readFileSync(this.cacheFilePath, 'utf-8');
+            const filePath = this.getCacheFilePath(baseKeyword);
+            if (fs.existsSync(filePath)) {
+                const data = fs.readFileSync(filePath, 'utf-8');
                 this.searchCache = JSON.parse(data);
+                console.log(`[Cache] Loaded ${Object.keys(this.searchCache).length} entries for "${baseKeyword}" from ${path.basename(filePath)}`);
+            } else {
+                console.log(`[Cache] No existing cache for "${baseKeyword}". Starting fresh.`);
             }
         } catch (e) {
             console.error('Failed to load cache', e);
@@ -32,8 +44,10 @@ export class ScraperService {
     }
 
     private saveCache() {
+        if (!this.currentBaseKeyword) return;
         try {
-            fs.writeFileSync(this.cacheFilePath, JSON.stringify(this.searchCache, null, 2), 'utf-8');
+            const filePath = this.getCacheFilePath(this.currentBaseKeyword);
+            fs.writeFileSync(filePath, JSON.stringify(this.searchCache, null, 2), 'utf-8');
         } catch (e) {
             console.error('Failed to save cache', e);
         }
@@ -112,7 +126,7 @@ export class ScraperService {
         socket: any,
         csvWriter: any,
         rivalLessKeywords: any[]
-    ): Promise<boolean> {
+    ): Promise<'success' | 'blocked' | 'retry' | 'skip'> {
         try {
             // Step 1: Search with base keyword + suggestion keyword
             const queryParts: string[] = [];
@@ -225,21 +239,18 @@ export class ScraperService {
             }
             this.saveCache();
 
-            return true; // Success
+            return 'success'; // Success
 
         } catch (e: any) {
             if (e.message && (e.message.includes('Blocked/Captcha') || e.message.includes('incompatible'))) {
-                socket.emit('log', `⚠️ Block/CAPTCHA detected! Stopping analysis strictly to prompt IP change.`);
-                socket.emit('blockDetected');
-                // Force stop
-                this.isRunning = false;
-                return false; // Interrupt the loop entirely
+                socket.emit('log', `⚠️ Block/CAPTCHA detected for "${keyword}".`);
+                return 'blocked';
             } else if (e.message && e.message.includes('temporary issue')) {
                 socket.emit('log', `⚠️ Temporary issue detected for "${keyword}". Adding to retry list.`);
-                return false; // Add to retry list
+                return 'retry'; // Add to retry list
             } else {
                 socket.emit('log', `❌ Error analyzing "${keyword}": ${e.message}`);
-                return true; // Skip this keyword (don't retry)
+                return 'skip'; // Skip this keyword
             }
         }
     }
@@ -292,12 +303,15 @@ export class ScraperService {
             const retryList: string[] = [];
 
             if (!useCache) {
-                socket.emit('log', `🗑️ キャッシュをクリアしました`);
+                socket.emit('log', `🗑️ 「${baseKeyword}」のキャッシュをクリアしました`);
+                // Load to set currentBaseKeyword correctly, then wipe
+                this.loadCache(baseKeyword);
                 this.searchCache = {};
                 this.saveCache();
             } else {
-                // Reload cache to be safe
-                this.loadCache();
+                // Load only this base keyword's cache
+                this.loadCache(baseKeyword);
+                socket.emit('log', `⚡ キャッシュ: ${Object.keys(this.searchCache).length}件のデータをロード`);
             }
 
             // Process all keywords
@@ -327,43 +341,33 @@ export class ScraperService {
                 // Increment count ONLY for actual API requests to Yahoo
                 count++;
 
-                // Batching: Cooldown & Session Reset every 10 keywords
-                if (count > 0 && count % 10 === 0) {
-                    const pauseMinutes = 1;
-                    socket.emit('log', `⏳ 一定件数(${count}件)に到達しました。安全のため ${pauseMinutes} 分間の一時休憩に入ります...`);
-                    socket.emit('log', `(※停止ボタンを押せばここで終了し、次回は続きから再開できます)`);
+                // Batching: Session reset every 50 keywords (no long pause needed - session restart is the key)
+                if (count > 0 && count % 50 === 0) {
+                    socket.emit('log', `🔄 ${count}件に到達。ブラウザセッションをリセットします...`);
 
-                    // Close browser to clear session fully
                     await this.scraper.close();
                     socket.emit('log', `[Scraper] ブラウザセッションを破棄しました`);
 
-                    for (let i = 0; i < pauseMinutes * 60; i++) {
+                    // Short 15s cooldown instead of 1 minute
+                    const cooldown = 15;
+                    socket.emit('batchPause', { active: true, remainingSeconds: cooldown, totalSeconds: cooldown });
+                    for (let i = 0; i < cooldown; i++) {
                         if (!this.isRunning) {
-                            socket.emit('log', `⏹️ 休憩中にユーザー操作で停止されました。`);
                             socket.emit('batchPause', { active: false });
-                            return; // User stopped the process completely
+                            return;
                         }
-                        // Emit remaining seconds to UI
-                        socket.emit('batchPause', { active: true, remainingSeconds: (pauseMinutes * 60) - i, totalSeconds: pauseMinutes * 60 });
+                        socket.emit('batchPause', { active: true, remainingSeconds: cooldown - i, totalSeconds: cooldown });
                         await sleep(1000);
                     }
 
-                    if (!this.isRunning) {
-                        socket.emit('batchPause', { active: false });
-                        return;
-                    }
-
-                    // Hide modal
                     socket.emit('batchPause', { active: false });
-
-                    // Re-init browser after pause
-                    socket.emit('log', `▶️ 休憩終了。新しいブラウザセッションで分析を再開します...`);
-                    await this.scraper.init(false); // Enable headful mode
+                    socket.emit('log', `▶️ セッション再起動完了。分析を続けます...`);
+                    await this.scraper.init(false);
                 }
 
                 const remaining = keywords.length - (keywords.indexOf(keyword) + 1);
-                // 1 search ~ 6 seconds, + 60s pause every 10 searches remaining.
-                const estimatedSeconds = (remaining * 6) + (Math.floor(remaining / 10) * 60);
+                // 1 search ~ 3 seconds, + 60s pause every 50 searches remaining.
+                const estimatedSeconds = (remaining * 3) + (Math.floor(remaining / 50) * 60);
 
                 socket.emit('progress', {
                     phase: 'analysis',
@@ -376,14 +380,31 @@ export class ScraperService {
                 // If not cached, clear cookies before searching
                 await this.scraper.clearCookies();
 
-                const success = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
+                let result = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
 
-                if (!success) {
+                // 2-stage block recovery
+                if (result === 'blocked') {
+                    socket.emit('log', `🔄 [1/2] ブロック検知。セッションを再起動してリトライします...`);
+                    await this.scraper.close();
+                    await sleep(5000); // Short cooldown
+                    await this.scraper.init(false);
+                    socket.emit('log', `🔄 [1/2] セッション再起動完了。リトライ中...`);
+                    result = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
+
+                    if (result === 'blocked') {
+                        socket.emit('log', `🚫 [2/2] 再試行後もブロック検知。IPアドレスの変更をお願いします。`);
+                        socket.emit('blockDetected');
+                        this.isRunning = false;
+                        return;
+                    }
+                }
+
+                if (result === 'retry') {
                     retryList.push(keyword);
                 }
 
                 // Random delay to avoid rate limiting
-                const delay = 5000 + Math.random() * 7000; // 5-12 seconds random delay
+                const delay = 1000 + Math.random() * 2000; // 1-3 seconds random delay
                 await sleep(delay);
             }
 
@@ -407,7 +428,7 @@ export class ScraperService {
                     await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
 
                     // Random delay
-                    const delay = 5000 + Math.random() * 7000; // 5-12 seconds random delay
+                    const delay = 1000 + Math.random() * 2000; // 1-3 seconds random delay
                     await sleep(delay);
                 }
             }
