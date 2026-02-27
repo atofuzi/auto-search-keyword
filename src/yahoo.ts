@@ -46,7 +46,12 @@ export class YahooScraper {
         if (!this.page) throw new Error('Scraper not initialized');
 
         try {
-            await this.page.goto('https://www.yahoo.co.jp/');
+            // Only navigate to Yahoo top if not already there.
+            // Reusing the existing page saves one full page load per hiragana character.
+            const currentUrl = this.page.url();
+            if (!currentUrl.startsWith('https://www.yahoo.co.jp')) {
+                await this.page.goto('https://www.yahoo.co.jp/');
+            }
 
             const inputSelector = 'input[aria-label="検索したいキーワードを入力してください"]';
             await this.page.waitForSelector(inputSelector);

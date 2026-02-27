@@ -5,6 +5,7 @@ import { createObjectCsvWriter } from 'csv-writer';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Server } from 'socket.io'; // Or just EventEmitter
+import { logger, isDebugEnabled } from './logger';
 
 // Define event types if needed, but for now we interact via Socket directly or callbacks
 // Using a class that takes a socket instance to emit events
@@ -34,12 +35,12 @@ export class ScraperService {
             if (fs.existsSync(filePath)) {
                 const data = fs.readFileSync(filePath, 'utf-8');
                 this.searchCache = JSON.parse(data);
-                console.log(`[Cache] Loaded ${Object.keys(this.searchCache).length} entries for "${baseKeyword}" from ${path.basename(filePath)}`);
+                logger.info(`[Cache] Loaded ${Object.keys(this.searchCache).length} entries for "${baseKeyword}" from ${path.basename(filePath)}`);
             } else {
-                console.log(`[Cache] No existing cache for "${baseKeyword}". Starting fresh.`);
+                logger.info(`[Cache] No existing cache for "${baseKeyword}". Starting fresh.`);
             }
         } catch (e) {
-            console.error('Failed to load cache', e);
+            logger.error('Failed to load cache', e);
         }
     }
 
@@ -49,8 +50,30 @@ export class ScraperService {
             const filePath = this.getCacheFilePath(this.currentBaseKeyword);
             fs.writeFileSync(filePath, JSON.stringify(this.searchCache, null, 2), 'utf-8');
         } catch (e) {
-            console.error('Failed to save cache', e);
+            logger.error('Failed to save cache', e);
         }
+    }
+
+    /**
+     * Build Yahoo search URL with intitle: for each keyword part
+     */
+    private buildYahooSearchUrl(keyword: string, baseKeyword: string): string {
+        const queryParts: string[] = [];
+
+        const baseParts = baseKeyword.split(/[\s|　]+/).filter((s: string) => s.length > 0);
+        baseParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
+
+        let suggestionOnly = keyword.trim();
+        const baseKeywordTrimmed = baseKeyword.trim();
+        if (suggestionOnly.startsWith(baseKeywordTrimmed)) {
+            suggestionOnly = suggestionOnly.substring(baseKeywordTrimmed.length).trim();
+        }
+
+        const suggestionParts = suggestionOnly.split(/[\s|　]+/).filter((s: string) => s.length > 0);
+        suggestionParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
+
+        const query = queryParts.join(' ');
+        return `https://search.yahoo.co.jp/search?p=${encodeURIComponent(query)}`;
     }
 
     async stop() {
@@ -107,7 +130,7 @@ export class ScraperService {
             socket.emit('status', { state: 'suggestions_done', message: 'Suggestions collected' });
 
         } catch (err) {
-            console.error(err);
+            logger.error('Error collecting suggestions', err);
             socket.emit('error', `Error collecting suggestions: ${err}`);
             socket.emit('status', { state: 'idle', message: 'Error' });
         } finally {
@@ -136,26 +159,30 @@ export class ScraperService {
             baseParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
 
             // Extract suggestion-only part (remove base keyword from full keyword)
-            // Example: keyword="高市早苗 愛車", baseKeyword="高市早苗" → suggestion="愛車"
             let suggestionOnly = keyword.trim();
             const baseKeywordTrimmed = baseKeyword.trim();
             if (suggestionOnly.startsWith(baseKeywordTrimmed)) {
                 suggestionOnly = suggestionOnly.substring(baseKeywordTrimmed.length).trim();
             }
 
-            socket.emit('log', `[DEBUG] キーワード抽出: 元="${keyword}", ベース="${baseKeyword}", サジェスト="${suggestionOnly}"`);
+            if (isDebugEnabled()) {
+                socket.emit('log', `[DEBUG] キーワード抽出: 元="${keyword}", ベース="${baseKeyword}", サジェスト="${suggestionOnly}"`);
+            }
 
             // Add suggestion keyword
             const suggestionParts = suggestionOnly.split(/[\s|　]+/).filter((s: string) => s.length > 0);
             suggestionParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
 
             const intitleQuery = queryParts.join(' ');
-            socket.emit('log', `[DEBUG] 検索クエリ: ${intitleQuery}`);
+            if (isDebugEnabled()) {
+                socket.emit('log', `[DEBUG] 検索クエリ: ${intitleQuery}`);
+            }
             const results = await this.scraper.getSearchResults(intitleQuery, 2);
 
             // Step 2: Check each title individually
-            // Count titles that match: (base AND suggestion) OR (custom AND suggestion)
-            socket.emit('log', `[DEBUG] 検索結果: ${results.length}件取得`);
+            if (isDebugEnabled()) {
+                socket.emit('log', `[DEBUG] 検索結果: ${results.length}件取得`);
+            }
 
             // Filter out Yahoo's "no results" message pages
             const validResults = results.filter(result =>
@@ -163,18 +190,20 @@ export class ScraperService {
                 !result.title.includes('に一致する情報は検出されませんでした')
             );
 
-            socket.emit('log', `[DEBUG] 有効な結果: ${validResults.length}件（除外: ${results.length - validResults.length}件）`);
-
-            // If all results were filtered out (Yahoo error pages), this is likely a temporary issue
-            if (results.length > 0 && validResults.length === 0) {
-                socket.emit('log', `⚠️ All results were Yahoo error pages for "${keyword}". This is likely temporary. Adding to retry list.`);
-                throw new Error('temporary issue: all results filtered');
+            if (isDebugEnabled()) {
+                socket.emit('log', `[DEBUG] 有効な結果: ${validResults.length}件（除外: ${results.length - validResults.length}件）`);
             }
+
+            // Note: validResults.length === 0 means Yahoo returned "no results found" page.
+            // This is a valid result (0 competitors = rival-less), NOT an error.
+            // We continue to matching logic below, which will find 0 matches ≤ threshold.
 
             const matchingResults = validResults.filter(result => {
                 const title = result.title.toLowerCase();
-                socket.emit('log', `[DEBUG] チェック: "${result.title}"`);
-                socket.emit('log', `[DEBUG] ベース="${baseKeyword}", サジェスト="${suggestionOnly}", カスタム="${customCheckWords?.join(', ') || 'なし'}"`);
+                if (isDebugEnabled()) {
+                    socket.emit('log', `[DEBUG] チェック: "${result.title}"`);
+                    socket.emit('log', `[DEBUG] ベース="${baseKeyword}", サジェスト="${suggestionOnly}", カスタム="${customCheckWords?.join(', ') || 'なし'}"`);
+                }
 
                 // Check if all parts of suggestion keyword are in title
                 const hasSuggestion = suggestionParts.every((part: string) =>
@@ -189,7 +218,7 @@ export class ScraperService {
                 );
 
                 if (hasBase) {
-                    socket.emit('log', `[DEBUG] ✅ マッチ（ベース+サジェスト）`);
+                    if (isDebugEnabled()) socket.emit('log', `[DEBUG] ✅ マッチ（ベース+サジェスト）`);
                     return true;
                 }
 
@@ -203,37 +232,38 @@ export class ScraperService {
                     });
 
                     if (hasCustom) {
-                        socket.emit('log', `[DEBUG] ✅ マッチ（カスタム+サジェスト）`);
+                        if (isDebugEnabled()) socket.emit('log', `[DEBUG] ✅ マッチ（カスタム+サジェスト）`);
                         return true;
                     }
                 }
 
-                socket.emit('log', `[DEBUG] ❌ マッチせず`);
+                if (isDebugEnabled()) socket.emit('log', `[DEBUG] ❌ マッチせず`);
                 return false;
             });
 
             const matchCount = matchingResults.length;
-            socket.emit('log', `[DEBUG] マッチ結果: ${matchCount}件/${results.length}件`);
+            if (isDebugEnabled()) {
+                socket.emit('log', `[DEBUG] マッチ結果: ${matchCount}件/${results.length}件`);
+            }
 
             if (matchCount <= threshold) {
-                const record: any = { keyword: keyword };
-
-                // Display top 5 search results (not just matched ones)
-                validResults.slice(0, 5).forEach((r, idx) => {
-                    const num = idx + 1;
-                    record[`title_${num}`] = r.title;
-                    record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
-                    record[`url_${num}`] = r.url;
-                });
+                // Build Yahoo search URL for the LINK column
+                const yahooLink = this.buildYahooSearchUrl(keyword, baseKeyword);
+                const record: any = {
+                    keyword: keyword,
+                    link: yahooLink,
+                };
 
                 rivalLessKeywords.push(record);
                 await csvWriter.writeRecords([record]);
                 socket.emit('result', record);
+                logger.info(`[完了] ライバルレス発見 (${matchCount}件): ${keyword}`);
                 socket.emit('log', `ライバルレス発見 (${matchCount}件): ${keyword}`);
 
                 // Save to cache as rival-less
                 this.searchCache[keyword] = { rivalLess: true, record };
             } else {
+                logger.info(`[完了] スキップ (${matchCount}件): ${keyword}`);
                 // Save to cache as not rival-less
                 this.searchCache[keyword] = { rivalLess: false };
             }
@@ -242,15 +272,30 @@ export class ScraperService {
             return 'success'; // Success
 
         } catch (e: any) {
-            if (e.message && (e.message.includes('Blocked/Captcha') || e.message.includes('incompatible'))) {
-                socket.emit('log', `⚠️ Block/CAPTCHA detected for "${keyword}".`);
+            const msg: string = e.message ?? '';
+
+            if (
+                msg.includes('Blocked/Captcha') ||
+                msg.includes('incompatible') ||
+                // Navigation timeout on goto = Yahoo likely blocking access
+                (msg.includes('page.goto') && msg.includes('Timeout'))
+            ) {
+                socket.emit('log', `⚠️ Block/CAPTCHA検知 "${keyword}": ${msg.slice(0, 80)}`);
+                logger.warn(`Block/CAPTCHA検知 "${keyword}": ${msg.slice(0, 80)}`);
                 return 'blocked';
-            } else if (e.message && e.message.includes('temporary issue')) {
-                socket.emit('log', `⚠️ Temporary issue detected for "${keyword}". Adding to retry list.`);
-                return 'retry'; // Add to retry list
+            } else if (
+                msg.includes('Execution context was destroyed') ||
+                msg.includes('temporary issue')
+            ) {
+                // "Execution context was destroyed" = Yahoo did a background navigation during evaluate.
+                // This is a transient error, NOT a block. Retry with the same session.
+                socket.emit('log', `⚠️ 一時エラー (リトライ対象) "${keyword}": ${msg.slice(0, 80)}`);
+                logger.warn(`一時エラー "${keyword}": ${msg.slice(0, 80)}`);
+                return 'retry';
             } else {
-                socket.emit('log', `❌ Error analyzing "${keyword}": ${e.message}`);
-                return 'skip'; // Skip this keyword
+                socket.emit('log', `❌ Error analyzing "${keyword}": ${msg}`);
+                logger.error(`Error analyzing "${keyword}": ${msg}`);
+                return 'skip';
             }
         }
     }
@@ -275,24 +320,18 @@ export class ScraperService {
 
         socket.emit('status', { state: 'analyzing', message: 'Starting analysis' });
 
+        // CSV: KEYWORD and LINK columns only
         const csvWriter = createObjectCsvWriter({
             path: outputPath,
             header: [
                 { id: 'keyword', title: 'KEYWORD' },
-                { id: 'title_1', title: 'Title_1' },
-                { id: 'link_1', title: 'Link_1' },
-                { id: 'title_2', title: 'Title_2' },
-                { id: 'link_2', title: 'Link_2' },
-                { id: 'title_3', title: 'Title_3' },
-                { id: 'link_3', title: 'Link_3' },
-                { id: 'title_4', title: 'Title_4' },
-                { id: 'link_4', title: 'Link_4' },
-                { id: 'title_5', title: 'Title_5' },
-                { id: 'link_5', title: 'Link_5' }
+                { id: 'link', title: 'LINK' },
             ]
         });
 
         const rivalLessKeywords: any[] = [];
+        // Collect keywords that failed even after retry
+        const errorKeywordList: string[] = [];
 
         try {
             await this.scraper.init(false); // Enable headful mode
@@ -304,12 +343,10 @@ export class ScraperService {
 
             if (!useCache) {
                 socket.emit('log', `🗑️ 「${baseKeyword}」のキャッシュをクリアしました`);
-                // Load to set currentBaseKeyword correctly, then wipe
                 this.loadCache(baseKeyword);
                 this.searchCache = {};
                 this.saveCache();
             } else {
-                // Load only this base keyword's cache
                 this.loadCache(baseKeyword);
                 socket.emit('log', `⚡ キャッシュ: ${Object.keys(this.searchCache).length}件のデータをロード`);
             }
@@ -322,12 +359,16 @@ export class ScraperService {
                 if (this.searchCache[keyword]) {
                     socket.emit('log', `⚡ キャッシュから復元 (スキップ): ${keyword}`);
                     const cachedData = this.searchCache[keyword];
-                    if (cachedData.rivalLess && cachedData.record) {
-                        rivalLessKeywords.push(cachedData.record);
-                        await csvWriter.writeRecords([cachedData.record]);
-                        socket.emit('result', cachedData.record);
+                    if (cachedData.rivalLess) {
+                        // Always generate the LINK from keyword (cached record may use old format without 'link')
+                        const csvRecord = {
+                            keyword,
+                            link: this.buildYahooSearchUrl(keyword, baseKeyword),
+                        };
+                        rivalLessKeywords.push(csvRecord);
+                        await csvWriter.writeRecords([csvRecord]);
+                        socket.emit('result', csvRecord);
                     }
-                    // emit progress even if skipped
                     socket.emit('progress', {
                         phase: 'analysis',
                         current: keywords.indexOf(keyword) + 1,
@@ -341,14 +382,12 @@ export class ScraperService {
                 // Increment count ONLY for actual API requests to Yahoo
                 count++;
 
-                // Batching: Session reset every 50 keywords (no long pause needed - session restart is the key)
+                // Batching: Session reset every 50 keywords
                 if (count > 0 && count % 50 === 0) {
                     socket.emit('log', `🔄 ${count}件に到達。ブラウザセッションをリセットします...`);
-
                     await this.scraper.close();
-                    socket.emit('log', `[Scraper] ブラウザセッションを破棄しました`);
+                    logger.info(`ブラウザセッションを破棄しました`);
 
-                    // Short 15s cooldown instead of 1 minute
                     const cooldown = 15;
                     socket.emit('batchPause', { active: true, remainingSeconds: cooldown, totalSeconds: cooldown });
                     for (let i = 0; i < cooldown; i++) {
@@ -366,7 +405,6 @@ export class ScraperService {
                 }
 
                 const remaining = keywords.length - (keywords.indexOf(keyword) + 1);
-                // 1 search ~ 3 seconds, + 60s pause every 50 searches remaining.
                 const estimatedSeconds = (remaining * 3) + (Math.floor(remaining / 50) * 60);
 
                 socket.emit('progress', {
@@ -377,6 +415,8 @@ export class ScraperService {
                     etaSeconds: estimatedSeconds
                 });
 
+                logger.info(`[対象] ${keyword}`);
+
                 // If not cached, clear cookies before searching
                 await this.scraper.clearCookies();
 
@@ -386,13 +426,14 @@ export class ScraperService {
                 if (result === 'blocked') {
                     socket.emit('log', `🔄 [1/2] ブロック検知。セッションを再起動してリトライします...`);
                     await this.scraper.close();
-                    await sleep(5000); // Short cooldown
+                    await sleep(5000);
                     await this.scraper.init(false);
                     socket.emit('log', `🔄 [1/2] セッション再起動完了。リトライ中...`);
                     result = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
 
                     if (result === 'blocked') {
                         socket.emit('log', `🚫 [2/2] 再試行後もブロック検知。IPアドレスの変更をお願いします。`);
+                        logger.warn('2段階ブロック検知。IPアドレス変更が必要');
                         socket.emit('blockDetected');
                         this.isRunning = false;
                         return;
@@ -401,14 +442,18 @@ export class ScraperService {
 
                 if (result === 'retry') {
                     retryList.push(keyword);
+                } else if (result === 'skip') {
+                    // Immediately treat skip as error (won't improve on retry)
+                    errorKeywordList.push(keyword);
+                    logger.warn(`[エラー] スキップ（手動確認推奨）: ${keyword}`);
                 }
 
                 // Random delay to avoid rate limiting
-                const delay = 1000 + Math.random() * 2000; // 1-3 seconds random delay
+                const delay = 1000 + Math.random() * 2000;
                 await sleep(delay);
             }
 
-            // Process retry list
+            // Process retry list — retry once, then move to errorKeywordList if still failing
             if (retryList.length > 0 && this.isRunning) {
                 socket.emit('log', `\n📋 リトライリスト: ${retryList.length}件のキーワードを再処理します...`);
 
@@ -424,16 +469,32 @@ export class ScraperService {
                         etaSeconds: 0
                     });
                     socket.emit('log', `🔄 リトライ: ${keyword}`);
+                    logger.info(`[リトライ] ${keyword}`);
 
-                    await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
+                    const retryResult = await this.processKeyword(keyword, baseKeyword, customCheckWords, threshold, socket, csvWriter, rivalLessKeywords);
 
-                    // Random delay
-                    const delay = 1000 + Math.random() * 2000; // 1-3 seconds random delay
+                    if (retryResult === 'retry' || retryResult === 'skip' || retryResult === 'blocked') {
+                        // Still failing → move to error list for manual review
+                        errorKeywordList.push(keyword);
+                        socket.emit('log', `⚠️ リトライ後も失敗。手動確認リストに追加: ${keyword}`);
+                        logger.warn(`[エラー] リトライ後も失敗（手動確認推奨）: ${keyword}`);
+                    }
+
+                    const delay = 1000 + Math.random() * 2000;
                     await sleep(delay);
                 }
             }
 
+            // Emit error keywords for manual review
+            if (errorKeywordList.length > 0) {
+                socket.emit('errorKeywords', errorKeywordList);
+                logger.info(`[完了] エラーキーワード ${errorKeywordList.length}件を手動確認リストに送信`);
+            }
+
             socket.emit('log', `Analysis complete. Found ${rivalLessKeywords.length} rival-less keywords.`);
+            if (errorKeywordList.length > 0) {
+                socket.emit('log', `⚠️ ${errorKeywordList.length}件のキーワードでエラーが発生しました。手動確認が必要です。`);
+            }
             socket.emit('status', {
                 state: 'finished',
                 message: 'Analysis complete',
@@ -441,7 +502,7 @@ export class ScraperService {
             });
 
         } catch (err) {
-            console.error(err);
+            logger.error('Error during analysis', err);
             socket.emit('error', `Error during analysis: ${err}`);
             socket.emit('status', { state: 'idle', message: 'Error' });
         } finally {
@@ -465,20 +526,12 @@ export class ScraperService {
 
         await this.scraper.init(false); // Enable headful mode
 
+        // CSV: KEYWORD and LINK columns only
         const csvWriter = createObjectCsvWriter({
             path: outputPath,
             header: [
                 { id: 'keyword', title: 'KEYWORD' },
-                { id: 'title_1', title: 'Title_1' },
-                { id: 'link_1', title: 'Link_1' },
-                { id: 'title_2', title: 'Title_2' },
-                { id: 'link_2', title: 'Link_2' },
-                { id: 'title_3', title: 'Title_3' },
-                { id: 'link_3', title: 'Link_3' },
-                { id: 'title_4', title: 'Title_4' },
-                { id: 'link_4', title: 'Link_4' },
-                { id: 'title_5', title: 'Title_5' },
-                { id: 'link_5', title: 'Link_5' }
+                { id: 'link', title: 'LINK' },
             ]
         });
 
@@ -521,65 +574,54 @@ export class ScraperService {
                 count++;
 
                 socket.emit('progress', { phase: 'analysis', current: count, total: keywordsArray.length, keyword });
+                logger.info(`[対象] ${keyword}`);
 
                 // Retry loop for this specific keyword
                 while (this.isRunning) {
                     try {
-                        // Construct intitle query
-                        // Split keyword into parts and prepend intitle:
                         const parts = keyword.split(/[\s|　]+/).filter(s => s.length > 0);
                         const intitleQuery = parts.map(p => `intitle:${p}`).join(' ');
 
-                        // Search with pagination support (up to 2 pages = 20 results)
-                        // Note: If we need strictly top 20, maxPages=2 is correct.
                         const results = await this.scraper.getSearchResults(intitleQuery, 2);
 
-                        // Logic: If the number of exact match results is <= threshold, it is rival-less.
                         if (results.length <= threshold) {
-                            const record: any = { keyword: keyword };
-
-                            // Populate up to 5 results for CSV (even if we fetched 20, CSV header only has 5 slots currently)
-                            // "CSV output feature... Outputs Top 5" -> Keep top 5 in CSV.
-
-                            results.slice(0, 5).forEach((r, idx) => {
-                                const num = idx + 1;
-                                record[`title_${num}`] = r.title;
-                                record[`link_${num}`] = `=HYPERLINK("${r.url}", "Link")`;
-                                record[`url_${num}`] = r.url;
-                            });
+                            const yahooLink = `https://search.yahoo.co.jp/search?p=${encodeURIComponent(intitleQuery)}`;
+                            const record: any = {
+                                keyword: keyword,
+                                link: yahooLink,
+                            };
 
                             rivalLessKeywords.push(record);
                             await csvWriter.writeRecords([record]);
 
-                            // Emit Found Result (send all top 5 for modal)
                             socket.emit('result', record);
                             socket.emit('log', `Found Rival-less (${results.length} hits): ${keyword}`);
+                            logger.info(`[完了] ライバルレス発見 (${results.length}件): ${keyword}`);
                         } else {
-                            // socket.emit('log', `Skipping: ${keyword} (${results.length} hits > ${threshold})`);
+                            logger.info(`[完了] スキップ (${results.length}件): ${keyword}`);
                         }
 
-                        await sleep(2000); // Normal interval
-                        break; // Success, exit retry loop and move to next keyword
+                        await sleep(2000);
+                        break;
 
                     } catch (e: any) {
                         if (e.message && e.message.includes('Blocked/Captcha')) {
                             const minutes = 3;
                             socket.emit('log', `⚠️ Block detected! Cooling down for ${minutes} minutes... (Will retry "${keyword}")`);
-                            // Wait for cooldown
+                            logger.warn(`Block detected for "${keyword}"`);
                             await sleep(minutes * 60 * 1000);
                             socket.emit('log', `♻️ Resuming analysis for "${keyword}"...`);
-                            // Loop continues automatically to retry
                         } else {
-                            console.error(e);
+                            logger.error(`Error processing ${keyword}: ${e.message}`);
                             socket.emit('log', `Error processing ${keyword}: ${e.message}`);
-                            break; // Unknown error, skip to next keyword
+                            break;
                         }
                     }
                 }
             }
 
         } catch (err) {
-            console.error(err);
+            logger.error('Fatal error', err);
             socket.emit('error', `Fatal error: ${err}`);
         } finally {
             this.isRunning = false;
