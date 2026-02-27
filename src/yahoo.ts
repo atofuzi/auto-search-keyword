@@ -49,7 +49,8 @@ export class YahooScraper {
             // Only navigate to Yahoo top if not already there.
             // Reusing the existing page saves one full page load per hiragana character.
             const currentUrl = this.page.url();
-            if (!currentUrl.startsWith('https://www.yahoo.co.jp')) {
+            const navigated = !currentUrl.startsWith('https://www.yahoo.co.jp');
+            if (navigated) {
                 await this.page.goto('https://www.yahoo.co.jp/');
             }
 
@@ -59,12 +60,13 @@ export class YahooScraper {
             // Phase 1 (Suggestions) does not require anti-bot slow typing
             await this.page.fill(inputSelector, `${baseKeyword} ${hiragana}`);
 
-            // Wait a brief moment for Yahoo's AJAX request to update the dropdown DOM with new suggestions
-            await this.page.waitForTimeout(500);
+            // After a fresh page navigation the AJAX takes longer to fire than when
+            // we are already on the Yahoo homepage and just change the input text.
+            await this.page.waitForTimeout(navigated ? 1500 : 500);
 
             const suggestListSelector = 'ul[aria-label="キーワード入力補助"]';
-            // Wait for suggestions logic
-            await this.page.waitForSelector(suggestListSelector, { timeout: 1000 });
+            // Allow more time after fresh navigation for the dropdown to appear
+            await this.page.waitForSelector(suggestListSelector, { timeout: navigated ? 3000 : 1500 });
 
             const suggestions = await this.page.$$eval(`${suggestListSelector} li a`, (els) => {
                 return els.map(el => {
@@ -80,6 +82,7 @@ export class YahooScraper {
             return [];
         }
     }
+
 
     async getSearchResults(keyword: string, maxPages: number = 2): Promise<{ title: string; url: string }[]> {
         if (!this.page) throw new Error('Scraper not initialized');
