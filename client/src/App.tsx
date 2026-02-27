@@ -6,7 +6,8 @@ const socket = io('http://localhost:3000');
 
 interface Result {
   keyword: string;
-  [key: string]: string;
+  link?: string;
+  [key: string]: string | undefined;
 }
 
 type Phase = 'input' | 'selection' | 'analysis' | 'complete';
@@ -33,8 +34,8 @@ function App() {
   const [phase2Progress, setPhase2Progress] = useState({ current: 0, total: 0, label: '待機中', etaSeconds: 0 });
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
-  // Modal state
-  const [selectedResult, setSelectedResult] = useState<Result | null>(null);
+  // Error keywords that need manual review
+  const [errorKeywords, setErrorKeywords] = useState<string[]>([]);
 
   // Pause Modal state
   const [pauseState, setPauseState] = useState<{ active: boolean, remainingSeconds: number, totalSeconds: number }>({ active: false, remainingSeconds: 0, totalSeconds: 0 });
@@ -101,7 +102,6 @@ function App() {
 
     socket.on('suggestionGroups', (groups: { [key: string]: string[] }) => {
       setSuggestionGroups(groups);
-      // Flatten groups to get all suggestions
       const allWords = Object.values(groups).flat();
       setAllSuggestions(allWords);
       setSelectedKeywords(new Set(allWords)); // Auto-select all
@@ -121,7 +121,11 @@ function App() {
 
     socket.on('blockDetected', () => {
       setShowBlockModal(true);
-      setIsRunning(false); // Force stop frontend state
+      setIsRunning(false);
+    });
+
+    socket.on('errorKeywords', (keywords: string[]) => {
+      setErrorKeywords(prev => [...prev, ...keywords]);
     });
 
     return () => {
@@ -134,6 +138,7 @@ function App() {
       socket.off('suggestionGroups');
       socket.off('batchPause');
       socket.off('blockDetected');
+      socket.off('errorKeywords');
     };
   }, []);
 
@@ -151,7 +156,7 @@ function App() {
 
   const handleStartAnalysisClick = () => {
     if (selectedKeywords.size === 0) return;
-    setShowCacheConfirm(true); // Always ask to confirm cache usage
+    setShowCacheConfirm(true);
   };
 
   const confirmStartAnalysis = (useCache: boolean) => {
@@ -200,6 +205,31 @@ function App() {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return `(想定残り時間: ${m}分 ${s}秒)`;
+  };
+
+  // Add an error keyword manually to the rival-less results list
+  const handleReset = () => {
+    setPhase('input');
+    setBaseKeyword('');
+    setCustomWords('');
+    setThreshold(3);
+    setSuggestionGroups({});
+    setAllSuggestions([]);
+    setSelectedKeywords(new Set());
+    setResults([]);
+    setLogs([]);
+    setDownloadUrl(null);
+    setErrorKeywords([]);
+    setPhase1Progress({ current: 0, total: 0, label: '待機中' });
+    setPhase2Progress({ current: 0, total: 0, label: '待機中', etaSeconds: 0 });
+  };
+
+  const addErrorKeywordToResults = (keyword: string) => {
+    const yahooLink = getYahooSearchUrl(keyword);
+    const record: Result = { keyword, link: yahooLink };
+    setResults(prev => [record, ...prev]);
+    // Remove from error list
+    setErrorKeywords(prev => prev.filter(k => k !== keyword));
   };
 
   const phase1Percent = phase1Progress.total > 0 && phase1Progress.current > 0
@@ -309,7 +339,7 @@ function App() {
             </div>
           </div>
 
-          {/* Keyword Selection Grid (Always visible during/after selection, but disabled if running) */}
+          {/* Keyword Selection Grid */}
           {(phase === 'selection' || phase === 'analysis' || phase === 'complete') && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -346,15 +376,25 @@ function App() {
                 ))}
               </div>
 
-              <div style={{ marginTop: '1.5rem', textAlign: 'center' }}>
+              <div style={{ marginTop: '1.5rem', textAlign: 'center', display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
                 {!isRunning ? (
-                  <button
-                    onClick={handleStartAnalysisClick}
-                    disabled={selectedKeywords.size === 0}
-                    style={{ padding: '1rem 3rem', fontSize: '1.1rem', backgroundColor: phase === 'analysis' || phase === 'complete' ? '#10b981' : undefined }}
-                  >
-                    {phase === 'analysis' || phase === 'complete' ? '▶️ 停止した分析を再開する' : `選択した ${selectedKeywords.size} 件で分析開始`}
-                  </button>
+                  <>
+                    <button
+                      onClick={handleStartAnalysisClick}
+                      disabled={selectedKeywords.size === 0}
+                      style={{ padding: '1rem 3rem', fontSize: '1.1rem', backgroundColor: phase === 'analysis' || phase === 'complete' ? '#10b981' : undefined }}
+                    >
+                      {phase === 'analysis' || phase === 'complete' ? '▶️ 停止した分析を再開する' : `選択した ${selectedKeywords.size} 件で分析開始`}
+                    </button>
+                    {phase === 'complete' && (
+                      <button
+                        onClick={handleReset}
+                        style={{ padding: '1rem 3rem', fontSize: '1.1rem', backgroundColor: '#475569' }}
+                      >
+                        🔄 新しいキーワードで始める
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <button disabled style={{ padding: '1rem 3rem', fontSize: '1.1rem', opacity: 0.5 }}>
                     分析実行中...
@@ -389,7 +429,7 @@ function App() {
         </div>
       )}
 
-      {/* Results Section */}
+      {/* Results Section — Rival-less Keywords */}
       <div className="card">
         <div className="status-bar">
           <div className="status-indicator">
@@ -403,30 +443,18 @@ function App() {
           )}
         </div>
 
-        <h2>分析結果 ({results.length})</h2>
+        <h2>分析結果 — ライバルレスキーワード ({results.length})</h2>
         <div className="results-grid">
           {results.map((r, i) => (
-            <div
-              key={i}
-              className="result-card"
-              onClick={() => setSelectedResult(r)}
-              style={{ cursor: 'pointer' }}
-            >
+            <div key={i} className="result-card">
               <a
-                href={getYahooSearchUrl(r.keyword)}
+                href={r.link ?? getYahooSearchUrl(r.keyword)}
                 target="_blank"
                 rel="noreferrer"
                 className="result-keyword"
-                onClick={(e) => e.stopPropagation()}
               >
                 {r.keyword}
               </a>
-              <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.5rem' }}>
-                Top 1: {r.title_1 ? r.title_1.substring(0, 30) + '...' : 'なし'}
-              </div>
-              <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#38bdf8' }}>
-                クリックして詳細を確認 →
-              </div>
             </div>
           ))}
         </div>
@@ -437,6 +465,46 @@ function App() {
         )}
       </div>
 
+      {/* Error Keywords Section — Manual Review */}
+      {errorKeywords.length > 0 && (
+        <div className="card" style={{ borderTop: '3px solid #f59e0b' }}>
+          <h2 style={{ color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <span>⚠️</span> エラーキーワード（手動確認が必要） ({errorKeywords.length})
+          </h2>
+          <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginTop: 0, marginBottom: '1rem' }}>
+            分析中にエラーが発生しリトライしても失敗したキーワードです。Yahoo検索で手動確認し、ライバルレスであれば「ライバルレスに追加」ボタンを押してください。
+          </p>
+          <div className="results-grid">
+            {errorKeywords.map((keyword, i) => (
+              <div key={i} className="result-card" style={{ borderColor: '#f59e0b' }}>
+                <a
+                  href={getYahooSearchUrl(keyword)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="result-keyword"
+                >
+                  {keyword}
+                </a>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <button
+                    onClick={() => addErrorKeywordToResults(keyword)}
+                    style={{
+                      fontSize: '0.75rem',
+                      padding: '0.35rem 0.75rem',
+                      backgroundColor: '#10b981',
+                      borderColor: '#10b981',
+                      width: '100%',
+                    }}
+                  >
+                    ✅ ライバルレスに追加
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* System Logs */}
       <div className="card">
         <h3>システムログ</h3>
@@ -446,50 +514,6 @@ function App() {
           ))}
         </div>
       </div>
-
-      {/* Detail Modal */}
-      {selectedResult && (
-        <div className="modal-overlay" onClick={() => setSelectedResult(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <button className="close-btn" onClick={() => setSelectedResult(null)}>&times;</button>
-
-            <h2>{selectedResult.keyword}</h2>
-
-            <div className="modal-actions">
-              <a
-                href={getYahooSearchUrl(selectedResult.keyword)}
-                target="_blank"
-                rel="noreferrer"
-                className="button-link"
-              >
-                Yahoo検索で確認 (intitle検索)
-              </a>
-            </div>
-
-            <div className="result-details">
-              <h3>上位の検索結果</h3>
-              {[1, 2, 3, 4, 5].map(num => {
-                const title = selectedResult[`title_${num}`];
-                const url = selectedResult[`url_${num}`];
-                if (!title) return null;
-                return (
-                  <div key={num} className="detail-item">
-                    <span className="rank-badge">{num}</span>
-                    <div className="detail-content">
-                      <div className="detail-title">{title}</div>
-                      {url && (
-                        <a href={url} target="_blank" rel="noreferrer" className="detail-link">
-                          {url}
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Cache Confirmation Modal */}
       {showCacheConfirm && (
