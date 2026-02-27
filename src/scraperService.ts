@@ -442,8 +442,8 @@ export class ScraperService {
                     logger.warn(`[エラー] スキップ（手動確認推奨）: ${keyword}`);
                 }
 
-                // Random delay to avoid rate limiting
-                const delay = 1000 + Math.random() * 2000;
+                // Short delay between keywords — no blocks observed so 300-800ms is sufficient
+                const delay = 300 + Math.random() * 500;
                 await sleep(delay);
             }
 
@@ -474,7 +474,7 @@ export class ScraperService {
                         logger.warn(`[エラー] リトライ後も失敗（手動確認推奨）: ${keyword}`);
                     }
 
-                    const delay = 1000 + Math.random() * 2000;
+                    const delay = 300 + Math.random() * 500;
                     await sleep(delay);
                 }
             }

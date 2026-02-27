@@ -95,15 +95,15 @@ export class YahooScraper {
                 if (pageNum === 1) {
                     await this.page.goto('https://www.yahoo.co.jp/');
                     await this.page.waitForLoadState('load');
-                    await this.page.waitForTimeout(Math.floor(Math.random() * 1000) + 1000); // Wait 1-2s
+                    await this.page.waitForTimeout(Math.floor(Math.random() * 500) + 500); // 0.5-1s
 
                     const inputSelector = 'input[aria-label="検索したいキーワードを入力してください"]';
                     await this.page.waitForSelector(inputSelector);
                     await this.page.click(inputSelector);
-                    await this.page.fill(inputSelector, '');
-                    await this.page.type(inputSelector, keyword, { delay: Math.floor(Math.random() * 100) + 50 });
+                    // fill() is instant and Yahoo doesn't detect typing speed — saves ~2s vs type()
+                    await this.page.fill(inputSelector, keyword);
 
-                    await this.page.waitForTimeout(Math.floor(Math.random() * 500) + 200);
+                    await this.page.waitForTimeout(200); // brief pause before submitting
                     await this.page.keyboard.press('Enter');
                     // Use 'load' instead of 'domcontentloaded' so ad scripts finish loading
                     // before we call page.evaluate(), reducing "Execution context was destroyed" errors.
@@ -116,16 +116,7 @@ export class YahooScraper {
                     await this.page.waitForLoadState('load');
                 }
 
-                // Random scroll down and up to simulate human reading
-                // Wrapped in try-catch: ad scripts may trigger a redirect during evaluate()
-                await this.page.waitForTimeout(Math.floor(Math.random() * 1000) + 500);
-                try {
-                    await this.page.evaluate(() => window.scrollBy(0, window.innerHeight * Math.random()));
-                    await this.page.waitForTimeout(Math.floor(Math.random() * 800) + 300);
-                    await this.page.evaluate(() => window.scrollBy(0, -500 * Math.random()));
-                } catch (_) {
-                    // Ignore scroll errors – they are cosmetic only
-                }
+                // Scroll simulation removed — no blocks have occurred and it saves ~1-2s per keyword
 
                 // Wait for results container (increased timeout to handle slow pages)
                 try {
