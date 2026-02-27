@@ -58,21 +58,11 @@ export class ScraperService {
      * Build Yahoo search URL with intitle: for each keyword part
      */
     private buildYahooSearchUrl(keyword: string, baseKeyword: string): string {
-        const queryParts: string[] = [];
-
-        const baseParts = baseKeyword.split(/[\s|　]+/).filter((s: string) => s.length > 0);
-        baseParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
-
-        let suggestionOnly = keyword.trim();
-        const baseKeywordTrimmed = baseKeyword.trim();
-        if (suggestionOnly.startsWith(baseKeywordTrimmed)) {
-            suggestionOnly = suggestionOnly.substring(baseKeywordTrimmed.length).trim();
-        }
-
-        const suggestionParts = suggestionOnly.split(/[\s|　]+/).filter((s: string) => s.length > 0);
-        suggestionParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
-
-        const query = queryParts.join(' ');
+        // Split the full keyword (e.g. "wbc 選手") into intitle: parts.
+        // Yahoo suggestions already include the base keyword, so no need to
+        // re-add it separately (which caused case-duplication like intitle:WBC intitle:wbc).
+        const parts = keyword.trim().split(/[\s|\u3000]+/).filter((s: string) => s.length > 0);
+        const query = parts.map((p: string) => `intitle:${p}`).join(' ');
         return `https://search.yahoo.co.jp/search?p=${encodeURIComponent(query)}`;
     }
 
@@ -156,12 +146,17 @@ export class ScraperService {
 
             // Add base keyword
             const baseParts = baseKeyword.split(/[\s|　]+/).filter((s: string) => s.length > 0);
-            baseParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
 
-            // Extract suggestion-only part (remove base keyword from full keyword)
+            // Build search query: use the full keyword split into intitle: parts.
+            // Yahoo suggestions already include the base keyword, so adding baseParts
+            // separately would cause duplication (e.g. intitle:WBC intitle:wbc).
+            const keywordParts = keyword.trim().split(/[\s|\u3000]+/).filter((s: string) => s.length > 0);
+            keywordParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
+
+            // Extract suggestion-only part for matching logic below
             let suggestionOnly = keyword.trim();
             const baseKeywordTrimmed = baseKeyword.trim();
-            if (suggestionOnly.startsWith(baseKeywordTrimmed)) {
+            if (suggestionOnly.toLowerCase().startsWith(baseKeywordTrimmed.toLowerCase())) {
                 suggestionOnly = suggestionOnly.substring(baseKeywordTrimmed.length).trim();
             }
 
@@ -169,9 +164,8 @@ export class ScraperService {
                 socket.emit('log', `[DEBUG] キーワード抽出: 元="${keyword}", ベース="${baseKeyword}", サジェスト="${suggestionOnly}"`);
             }
 
-            // Add suggestion keyword
-            const suggestionParts = suggestionOnly.split(/[\s|　]+/).filter((s: string) => s.length > 0);
-            suggestionParts.forEach((p: string) => queryParts.push(`intitle:${p}`));
+            // Add suggestion parts (used for title matching, not for query building)
+            const suggestionParts = suggestionOnly.split(/[\s|\u3000]+/).filter((s: string) => s.length > 0);
 
             const intitleQuery = queryParts.join(' ');
             if (isDebugEnabled()) {
