@@ -5,12 +5,12 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import { ScraperService } from './scraperService';
+import { logger } from './logger';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static files (CSV downloads) from root
 // Serve static files (CSV downloads) from root
 app.use('/download', express.static(process.cwd(), {
     setHeaders: (res, path, stat) => {
@@ -29,11 +29,11 @@ const io = new Server(server, {
 const scraperService = new ScraperService();
 
 io.on('connection', (socket) => {
-    console.log('Client connected');
+    logger.info('Client connected');
 
     // Phase 1: Get Suggestions
     socket.on('getSuggestions', async (data: { keyword: string, verificationMode?: boolean }) => {
-        console.log('Suggestions requested', data);
+        logger.info(`Suggestions requested for: ${data.keyword}`);
         const { keyword, verificationMode = false } = data;
 
         const envVerification = process.env.VERIFICATION_MODE === 'true';
@@ -50,7 +50,7 @@ io.on('connection', (socket) => {
         baseKeyword?: string,
         useCache?: boolean
     }) => {
-        console.log('Analysis requested', data.keywords.length + ' keywords');
+        logger.info(`Analysis requested: ${data.keywords.length} keywords`);
         const { keywords, threshold = 3, customWords = '', baseKeyword = '', useCache = true } = data;
 
         const customWordsArray = customWords
@@ -61,18 +61,18 @@ io.on('connection', (socket) => {
     });
 
     socket.on('stop', async () => {
-        console.log('Stop command received');
+        logger.info('Stop command received');
         await scraperService.stop();
         socket.emit('log', 'Process stopped by user.');
     });
 
     socket.on('disconnect', () => {
-        console.log('Client disconnected');
+        logger.info('Client disconnected');
         scraperService.stop();
     });
 });
 
 const PORT = 3000;
 server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    logger.info(`Server running on http://localhost:${PORT}`);
 });
