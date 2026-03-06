@@ -188,9 +188,13 @@ export class ScraperService {
                 socket.emit('log', `[DEBUG] 有効な結果: ${validResults.length}件（除外: ${results.length - validResults.length}件）`);
             }
 
-            // Note: validResults.length === 0 means Yahoo returned "no results found" page.
-            // This is a valid result (0 competitors = rival-less), NOT an error.
-            // We continue to matching logic below, which will find 0 matches ≤ threshold.
+            // validResults が 0件 の場合はAIのみページや取得失敗の可能性があるためスキップ
+            // (0件をそのままmatchCount=0にするとthreshold以下となりライバルレス誤判定になる)
+            if (validResults.length === 0) {
+                socket.emit('log', `⚠️ 検索結果0件のためスキップ（AIのみページの可能性）: ${keyword}`);
+                logger.warn(`[スキップ] 検索結果0件: ${keyword}`);
+                return 'skip';
+            }
 
             const matchingResults = validResults.filter(result => {
                 const title = result.title.toLowerCase();
