@@ -122,21 +122,22 @@ export class YahooScraper {
                 try {
                     await this.page.waitForSelector('.sw-Card__titleMain', { timeout: 5000 });
                 } catch (e) {
-                    // If element not found, check if it's a valid "No Results" page
+                    // If element not found, first check for definitive block/error pages
                     const bodyText = await this.page.textContent('body');
-                    if (bodyText?.includes('一致する情報は見つかりませんでした')) {
-                        // Potentially temporary - throw to allow retry
-                        throw new Error('Yahoo Search returned no results (Possible temporary issue)');
-                    } else if (bodyText?.includes('一時的にアクセスできません') || bodyText?.includes('二段階認証') || bodyText?.includes('現在表示できません')) {
-                        // CAPTCHA or Ban detection
-                        throw new Error('Yahoo Search Blocked/Captcha detected');
-                    } else {
-                        // Unknown state (maybe layout changed or slow load), but risking it as 0 results is bad.
-                        // Let's create a screenshot for debug if possible, but for now throw error.
+                    if (
+                        bodyText?.includes('現在表示できません') ||    // ブロック画面の固有テキスト
+                        bodyText?.includes('一時的にアクセスできません') ||
+                        bodyText?.includes('二段階認証')
+                    ) {
+                        // Definitive block / CAPTCHA screen detected
                         const screenshotPath = path.resolve(process.cwd(), `error_screenshot_${Date.now()}.png`);
                         await this.page.screenshot({ path: screenshotPath, fullPage: true });
-                        console.log(`[Scraper] Unknown page state. Saved screenshot to ${screenshotPath}`);
-                        throw new Error('Search results incompatible (Possible block or layout change)');
+                        console.log(`[Scraper] Block screen detected. Saved screenshot to ${screenshotPath}`);
+                        throw new Error('Yahoo Search Blocked/Captcha detected');
+                    } else {
+                        // Not a block screen — treat as 0 organic results (e.g. AI-only answer page)
+                        console.log(`[Scraper] No organic results found for page ${pageNum} (possibly AI-only answer). Treating as 0 results.`);
+                        break;
                     }
                 }
 
