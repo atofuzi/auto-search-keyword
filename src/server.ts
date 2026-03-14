@@ -32,14 +32,14 @@ io.on('connection', (socket) => {
     logger.info('Client connected');
 
     // Phase 1: Get Suggestions
-    socket.on('getSuggestions', async (data: { keyword: string, verificationMode?: boolean }) => {
-        logger.info(`Suggestions requested for: ${data.keyword}`);
-        const { keyword, verificationMode = false } = data;
+    socket.on('getSuggestions', async (data: { keyword: string, verificationMode?: boolean, searchMode?: 'yahoo' | 'google' }) => {
+        logger.info(`Suggestions requested for: ${data.keyword} (mode: ${data.searchMode ?? 'yahoo'})`);
+        const { keyword, verificationMode = false, searchMode = 'yahoo' } = data;
 
         const envVerification = process.env.VERIFICATION_MODE === 'true';
         const isVerify = verificationMode || envVerification;
 
-        await scraperService.getSuggestionsOnly(keyword, socket, isVerify);
+        await scraperService.getSuggestionsOnly(keyword, socket, isVerify, searchMode);
     });
 
     // Phase 2: Start Analysis

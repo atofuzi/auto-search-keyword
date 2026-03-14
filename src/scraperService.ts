@@ -1,4 +1,5 @@
 import { YahooScraper } from './yahoo';
+import { GoogleScraper } from './google';
 import { HIRAGANA_LIST, sleep } from './utils';
 import { isRivalLess } from './analyzer';
 import { createObjectCsvWriter } from 'csv-writer';
@@ -12,12 +13,14 @@ import { logger, isDebugEnabled } from './logger';
 
 export class ScraperService {
     private scraper: YahooScraper;
+    private googleScraper: GoogleScraper;
     private isRunning: boolean = false;
     private currentBaseKeyword: string = '';
     private searchCache: { [keyword: string]: any } = {};
 
     constructor() {
         this.scraper = new YahooScraper();
+        this.googleScraper = new GoogleScraper();
         // Cache is loaded lazily when analysis starts for a specific base keyword
     }
 
@@ -74,13 +77,25 @@ export class ScraperService {
     /**
      * Phase 1: Collect suggestions only and group by Hiragana character
      */
-    async getSuggestionsOnly(baseKeyword: string, socket: any, verificationMode: boolean = false) {
+    async getSuggestionsOnly(
+        baseKeyword: string,
+        socket: any,
+        verificationMode: boolean = false,
+        searchMode: 'yahoo' | 'google' = 'yahoo'
+    ) {
         if (this.isRunning) return;
         this.isRunning = true;
 
+        const isGoogle = searchMode === 'google';
+
         try {
-            socket.emit('status', { state: 'collecting', message: `Collecting suggestions for: "${baseKeyword}"` });
-            await this.scraper.init(false); // Enable headful mode
+            socket.emit('status', { state: 'collecting', message: `Collecting suggestions for: "${baseKeyword}" (${isGoogle ? 'Google 前方検索' : 'Yahoo 後方検索'})` });
+
+            if (isGoogle) {
+                await this.googleScraper.init(false);
+            } else {
+                await this.scraper.init(false);
+            }
 
             const chars_to_check = verificationMode ? HIRAGANA_LIST.slice(0, 10) : HIRAGANA_LIST;
             const groupedSuggestions: { [key: string]: string[] } = {};
@@ -91,7 +106,11 @@ export class ScraperService {
                 const char = chars_to_check[i];
                 if (!this.isRunning) break;
 
-                const suggestions = await this.scraper.getSuggestions(baseKeyword, char);
+                // Google: {ひらがな} {キーワード}、Yahoo: {キーワード} {ひらがな}
+                const suggestions = isGoogle
+                    ? await this.googleScraper.getSuggestions(char, baseKeyword)
+                    : await this.scraper.getSuggestions(baseKeyword, char);
+
                 socket.emit('progress', {
                     phase: 'suggestions',
                     char,
@@ -124,6 +143,11 @@ export class ScraperService {
             socket.emit('error', `Error collecting suggestions: ${err}`);
             socket.emit('status', { state: 'idle', message: 'Error' });
         } finally {
+            if (isGoogle) {
+                await this.googleScraper.close();
+            } else {
+                // Yahoo scraper は analyzeKeywords でも共有するため close しない
+            }
             this.isRunning = false;
         }
     }

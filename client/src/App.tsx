@@ -16,6 +16,7 @@ function App() {
   // Phase management
   const [phase, setPhase] = useState<Phase>('input');
   const [baseKeyword, setBaseKeyword] = useState('');
+  const [searchMode, setSearchMode] = useState<'yahoo' | 'google'>('yahoo');
 
   // Phase 2 inputs (shown after suggestions collected)
   const [customWords, setCustomWords] = useState('');
@@ -151,7 +152,7 @@ function App() {
 
   const handleGetSuggestions = () => {
     if (!baseKeyword) return;
-    socket.emit('getSuggestions', { keyword: baseKeyword });
+    socket.emit('getSuggestions', { keyword: baseKeyword, searchMode });
   };
 
   const handleStartAnalysisClick = () => {
@@ -213,6 +214,7 @@ function App() {
     setBaseKeyword('');
     setCustomWords('');
     setThreshold(3);
+    setSearchMode('yahoo');
     setSuggestionGroups({});
     setAllSuggestions([]);
     setSelectedKeywords(new Set());
@@ -248,12 +250,12 @@ function App() {
       <div className="card" style={{ marginBottom: '2rem', fontSize: '0.9rem', color: '#cbd5e1' }}>
         <h3 style={{ marginTop: 0, marginBottom: '0.5rem', color: '#fff' }}>このツールの仕様</h3>
         <ul style={{ paddingLeft: '1.5rem', margin: 0, lineHeight: '1.6' }}>
-          <li>検索エンジン：<strong>Yahoo! JAPAN</strong></li>
-          <li><strong>Phase 1</strong>: 「狙っているワード」を入力してサジェストワードを収集します（五十音50音で検索）</li>
-          <li><strong>Phase 2</strong>: 収集したサジェストから分析対象を選択し、ライバル記事数を調査します</li>
+          <li><strong>後方検索（Yahoo）</strong>: 「キーワード ＋ 五十音」で Yahoo サジェストを取得</li>
+          <li><strong>前方検索（Google）</strong>: 「五十音 ＋ キーワード」で Google サジェストを取得</li>
+          <li><strong>Phase 2</strong>: 収集したサジェストから分析対象を選択し、Yahoo でライバル記事数を調査します</li>
           <li>検索結果の最大取得ページは <strong>2ページ</strong> までです</li>
           <li>1回の検索ごとに1〜3秒のランダムな待機時間を設けます（ブロック対策）</li>
-          <li>50件ごとにブラウザセッションを再構築します（休憩は15秒かぐれのみ）</li>
+          <li>50件ごとにブラウザセッションを再構築します（休憩は15秒）</li>
         </ul>
       </div>
 
@@ -267,10 +269,48 @@ function App() {
               type="text"
               value={baseKeyword}
               onChange={e => setBaseKeyword(e.target.value)}
-              placeholder="例: ミラノオリンピック"
+              placeholder="例: 髪型"
               disabled={isRunning || phase !== 'input'}
             />
           </div>
+
+          {/* 検索モード選択 */}
+          <div className="input-group" style={{ flex: '1 1 100%' }}>
+            <label>検索モード</label>
+            <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', color: '#f8fafc', fontWeight: 'normal' }}>
+                <input
+                  type="radio"
+                  name="searchMode"
+                  value="yahoo"
+                  checked={searchMode === 'yahoo'}
+                  onChange={() => setSearchMode('yahoo')}
+                  disabled={isRunning || phase !== 'input'}
+                  style={{ accentColor: '#38bdf8', width: '16px', height: '16px' }}
+                />
+                <span>
+                  <strong>後方検索（Yahoo）</strong>
+                  <span style={{ fontSize: '0.8rem', color: '#94a3b8', marginLeft: '0.4rem' }}>例: 髪型 あ</span>
+                </span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', color: '#f8fafc', fontWeight: 'normal' }}>
+                <input
+                  type="radio"
+                  name="searchMode"
+                  value="google"
+                  checked={searchMode === 'google'}
+                  onChange={() => setSearchMode('google')}
+                  disabled={isRunning || phase !== 'input'}
+                  style={{ accentColor: '#34d399', width: '16px', height: '16px' }}
+                />
+                <span>
+                  <strong>前方検索（Google）</strong>
+                  <span style={{ fontSize: '0.8rem', color: '#94a3b8', marginLeft: '0.4rem' }}>例: あ 髪型</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
           <div style={{ width: '100%', marginTop: '1rem' }}>
             {phase === 'input' ? (
               <button
@@ -278,11 +318,11 @@ function App() {
                 disabled={!baseKeyword || isRunning}
                 style={{ width: '100%' }}
               >
-                サジェスト取得開始
+                {searchMode === 'google' ? '🔍 Google で' : '🔍 Yahoo で'}サジェスト取得開始
               </button>
             ) : (
               <button disabled style={{ width: '100%', opacity: 0.5 }}>
-                サジェスト取得済み
+                サジェスト取得済み（{searchMode === 'google' ? 'Google 前方検索' : 'Yahoo 後方検索'}）
               </button>
             )}
           </div>
